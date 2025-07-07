@@ -83,10 +83,10 @@ def create_app(args):
     </style>
     <h1>UMLS Similarity Search</h1>
     <form method="post" action="/search">
-      <label>Query:<br><input type="text" name="query" size="60" required></label><br><br>
+      <label>Query:<br><input type="text" name="query" size="60" required value="{{query}}"></label><br><br>
       <label>Number of results:<br><input type="number" name="top_k" value="{{default_top_k}}" min="1"></label><br><br>
       <label>Maximum score (optional):<br>
-        <input type="number" name="max_score" step="any" placeholder="e.g. 0.5">
+        <input type="number" name="max_score" step="any" placeholder="e.g. 0.5" value="{{default_max_score}}">
         <small>Increase to allow more distant matches</small>
       </label><br><br>
       <input type="submit" value="Search">
@@ -129,7 +129,9 @@ def create_app(args):
         return render_template_string(
             TEMPLATE,
             results=None,
+            query="",
             default_top_k=DEFAULT_TOP_K,
+            default_max_score="",
             sty_set=[],
         )
 
@@ -168,6 +170,7 @@ def create_app(args):
             results=results,
             query=query,
             default_top_k=top_k,
+            default_max_score=max_score_in,
             sty_set=sty_set,
         )
 
