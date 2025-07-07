@@ -71,11 +71,14 @@ def create_app(args):
     </form>
     {% if results %}
     <h2>Results for "{{query}}"</h2>
-    <div id="sty-filters">
-      <strong>Filter by Semantic Type:</strong>
-      {% for sty in sty_set %}
-        <label><input type="checkbox" class="sty-filter" value="{{sty}}" checked> {{sty}}</label>
-      {% endfor %}
+    <div id="sty-filter">
+      <label for="sty-select"><strong>Semantic Type:</strong></label>
+      <select id="sty-select">
+        <option value="">All</option>
+        {% for sty in sty_set %}
+          <option value="{{sty}}">{{sty}}</option>
+        {% endfor %}
+      </select>
     </div>
     <br>
     <table border="1" cellpadding="5" cellspacing="0">
@@ -87,14 +90,14 @@ def create_app(args):
       {% endfor %}
     </table>
     <script>
-    function updateFilters() {
-      const checked = Array.from(document.querySelectorAll('.sty-filter:checked')).map(cb => cb.value);
+    function updateFilter() {
+      const selected = document.getElementById('sty-select').value;
       document.querySelectorAll('.result-row').forEach(row => {
         const sty = row.getAttribute('data-sty');
-        row.style.display = checked.includes(sty) ? '' : 'none';
+        row.style.display = !selected || sty === selected ? '' : 'none';
       });
     }
-    document.querySelectorAll('.sty-filter').forEach(cb => cb.addEventListener('change', updateFilters));
+    document.getElementById('sty-select').addEventListener('change', updateFilter);
     </script>
     {% endif %}
     """
