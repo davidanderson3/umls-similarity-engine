@@ -45,12 +45,12 @@ To skip embedding computation, which can take a while, pull prebuilt files from 
 
 ```bash
 pip install huggingface_hub
+mkdir -p final
 python - <<'EOF'
 from huggingface_hub import hf_hub_download
-# repo_id should match your HF namespace/repo name:
 repo_id = "dvdndrsn/umls-sapbert-faiss"
 fname   = "final/umls_index_hnsw.faiss"
-# this will download into ./final/umls_index_hnsw.faiss
+# make sure final/ exists:
 path = hf_hub_download(repo_id=repo_id, filename=fname, local_dir="final")
 print("Downloaded index to:", path)
 EOF
@@ -105,7 +105,7 @@ This will add the FAISS index:
      --index    final/umls_index_hnsw.faiss \
      --host 0.0.0.0 --port 5000
    ```
-
+   Navigate to http://127.0.0.1:5000 in your web browser. 
 ---
 
 
