@@ -100,7 +100,7 @@ def create_app(args):
     """
 
     @app.route("/", methods=["GET"])
-    def index():
+    def index_page():
         return render_template_string(
             TEMPLATE,
             results=None,
