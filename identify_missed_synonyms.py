@@ -10,6 +10,7 @@ Outputs a CSV with the following columns:
     CUI1,STR1,CUI2,STR2,SIMILARITY
 
 Similarity is the cosine similarity computed from the L2-normalized vectors.
+Optionally filter results by maximum string length with ``--max_len``.
 """
 
 import argparse
@@ -50,6 +51,12 @@ def parse_args():
         default="missed_synonyms.csv",
         help="Where to write the output CSV",
     )
+    p.add_argument(
+        "--max_len",
+        type=int,
+        default=None,
+        help="Maximum character length for STR fields to consider",
+    )
     return p.parse_args()
 
 
@@ -83,6 +90,9 @@ def main():
             seen.add(pair)
             sim = 1.0 - float(dist) / 2.0
             if sim >= args.threshold and cuis[i] != cuis[j]:
+                if args.max_len is not None:
+                    if len(strs[i]) > args.max_len or len(strs[j]) > args.max_len:
+                        continue
                 results.append((cuis[i], strs[i], cuis[j], strs[j], sim))
 
     results.sort(key=lambda x: -x[4])
