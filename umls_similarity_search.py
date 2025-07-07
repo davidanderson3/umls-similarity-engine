@@ -9,6 +9,7 @@ umls_similarity_search.py
 """
 
 import argparse
+import ast
 import pandas as pd
 import faiss
 import numpy as np
@@ -30,12 +31,21 @@ def parse_args():
     return p.parse_args()
 
 def load_metadata(path):
-    df = pd.read_csv(path, usecols=["CUI","STR","STY"]).dropna()
-    return (
-        df["CUI"].astype(str).tolist(),
-        df["STR"].astype(str).tolist(),
-        df["STY"].astype(str).tolist(),
-    )
+    df = pd.read_csv(path, usecols=["CUI", "STR", "STY"]).dropna()
+    cuis = df["CUI"].astype(str).tolist()
+    terms = df["STR"].astype(str).tolist()
+    stys_raw = df["STY"].astype(str).tolist()
+    stys = []
+    for s in stys_raw:
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, list):
+                stys.append(parsed)
+            else:
+                stys.append([str(parsed)])
+        except Exception:
+            stys.append([s])
+    return (cuis, terms, stys)
 
 def encode_query(text, tokenizer, model, device):
     # tokenize
@@ -77,7 +87,8 @@ def main():
 
         print(f"\nTop {args.top_k} results for “{q}”:\n")
         for rank, (idx, score) in enumerate(zip(I[0], D[0]), start=1):
-            print(f"{rank:2d}. {cuis[idx]}  {terms[idx]:<50}  {stys[idx]:<20}  {score:.4f}")
+            sty_str = ", ".join(stys[idx])
+            print(f"{rank:2d}. {cuis[idx]}  {terms[idx]:<50}  {sty_str:<20}  {score:.4f}")
 
 if __name__ == "__main__":
     main()
