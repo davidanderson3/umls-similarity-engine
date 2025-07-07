@@ -2,6 +2,8 @@
 """
 precompute.py
 
+  - Must use 2025AA Full Metathesaurus Subset from https://download.nlm.nih.gov/umls/kss/2025AA/umls-2025AA-metathesaurus-full.zip
+
 Reads:
   - MRCONSO.RRF (atom strings)
   - MRSTY.RRF  (semantic types)
