@@ -25,13 +25,8 @@ The typical pipeline is:
      semantic types.
    - `umls_similarity_web.py` runs a small Flask application providing the same
      functionality in a browser.
-6. **Find missed synonyms (optional)**
-   - `identify_missed_synonyms.py` uses the embeddings and index to locate pairs of
-     concepts from different CUIs whose vectors are extremely similar.
 
 ## Requirements
-
-Python 3 is required. Install the dependencies with:
 
 ```bash
 pip install pandas numpy torch transformers faiss-cpu flask tqdm
