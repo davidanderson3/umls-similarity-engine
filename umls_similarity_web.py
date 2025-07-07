@@ -53,6 +53,9 @@ def encode_query(text, tokenizer, model, device):
     with torch.no_grad():
         out = model(**enc)
         cls_emb = out.last_hidden_state[:, 0, :].cpu().numpy().astype("float32")
+
+    # normalize query so distance scores align with the index vectors
+    faiss.normalize_L2(cls_emb)
     return cls_emb
 
 
