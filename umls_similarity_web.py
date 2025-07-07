@@ -8,6 +8,8 @@ import torch
 from flask import Flask, request, render_template_string
 from transformers import AutoTokenizer, AutoModel
 
+DEFAULT_TOP_K = 10
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="UMLS similarity search web app")
@@ -15,7 +17,6 @@ def parse_args():
     p.add_argument("--index", required=True, help="Path to umls_index_hnsw.faiss")
     p.add_argument("--model", default="cambridgeltl/SapBERT-from-PubMedBERT-fulltext",
                    help="SapBERT model ID or local dir")
-    p.add_argument("--top_k", type=int, default=10, help="Default number of results")
     p.add_argument("--ef_search", type=int, default=64,
                    help="HNSW efSearch (higher=more accurate/slower)")
     p.add_argument("--host", default="0.0.0.0", help="Host for the web server")
@@ -61,34 +62,57 @@ def create_app(args):
       <label>Query:<br><input type="text" name="query" size="60" required></label><br><br>
       <label>Number of results:<br><input type="number" name="top_k" value="{{default_top_k}}" min="1"></label><br><br>
       <label>Semantic Types (comma separated, optional):<br>
-        <input type="text" name="semantic_types" size="60">
+        <input type="text" name="semantic_types" size="60" value="{{semantic_types_text}}">
       </label><br><br>
       <input type="submit" value="Search">
     </form>
     {% if results %}
     <h2>Results for "{{query}}"</h2>
+    <div id="sty-filters">
+      <strong>Filter by Semantic Type:</strong>
+      {% for sty in sty_set %}
+        <label><input type="checkbox" class="sty-filter" value="{{sty}}" checked> {{sty}}</label>
+      {% endfor %}
+    </div>
+    <br>
     <table border="1" cellpadding="5" cellspacing="0">
       <tr><th>Rank</th><th>CUI</th><th>Term</th><th>Semantic Type</th><th>Score</th></tr>
       {% for r in results %}
-      <tr>
+      <tr class="result-row" data-sty="{{r[2]}}">
         <td>{{loop.index}}</td><td>{{r[0]}}</td><td>{{r[1]}}</td><td>{{r[2]}}</td><td>{{"%.4f"|format(r[3])}}</td>
       </tr>
       {% endfor %}
     </table>
+    <script>
+    function updateFilters() {
+      const checked = Array.from(document.querySelectorAll('.sty-filter:checked')).map(cb => cb.value);
+      document.querySelectorAll('.result-row').forEach(row => {
+        const sty = row.getAttribute('data-sty');
+        row.style.display = checked.includes(sty) ? '' : 'none';
+      });
+    }
+    document.querySelectorAll('.sty-filter').forEach(cb => cb.addEventListener('change', updateFilters));
+    </script>
     {% endif %}
     """
 
     @app.route("/", methods=["GET"])
     def index():
-        return render_template_string(TEMPLATE, results=None, default_top_k=args.top_k)
+        return render_template_string(
+            TEMPLATE,
+            results=None,
+            default_top_k=DEFAULT_TOP_K,
+            semantic_types_text="",
+            sty_set=[],
+        )
 
     @app.route("/search", methods=["POST"])
     def search():
         query = request.form.get("query", "").strip()
         try:
-            top_k = int(request.form.get("top_k", args.top_k))
+            top_k = int(request.form.get("top_k", DEFAULT_TOP_K))
         except ValueError:
-            top_k = args.top_k
+            top_k = DEFAULT_TOP_K
         sty_input = request.form.get("semantic_types", "")
         semantic_types = [s.strip() for s in sty_input.split(",") if s.strip()]
 
@@ -103,11 +127,15 @@ def create_app(args):
                 if len(results) >= top_k:
                     break
 
+        sty_set = sorted({r[2] for r in results})
+
         return render_template_string(
             TEMPLATE,
             results=results,
             query=query,
             default_top_k=top_k,
+            semantic_types_text=sty_input,
+            sty_set=sty_set,
         )
 
     return app
