@@ -44,13 +44,13 @@ conda install -c conda-forge pandas numpy flask tqdm transformers pytorch cpuonl
 To skip embedding computation, which can take a while, pull prebuilt files from Hugging Face Hub repo:
 
 ```bash
-git lfs install
-git clone https://huggingface.co/dvdndrsn/umls-sapbert-faiss
-cd umls-sapbert-faiss
+mkdir -p final
+curl -L \
+  https://huggingface.co/dvdndrsn/umls-sapbert-faiss/resolve/main/final/umls_index_hnsw.faiss \
+  -o final/umls_index_hnsw.faiss
 ```
 
-Artifacts include:
-- `final/umls_embeddings.npy`
+This will add the FAISS index:
 - `final/umls_index_hnsw.faiss`
 
 ## Or - Build the artifacts yourself
