@@ -31,7 +31,7 @@ Project encodes preferred English terms using the SapBERT model and performs nea
 
 ## Requirements
 
-Conda is recommended. 
+Conda is recommended. Install conda then:
 
 ```bash
 conda create -n umls-similarity python=3.9
