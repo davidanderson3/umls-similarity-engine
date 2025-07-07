@@ -9,12 +9,15 @@ from flask import Flask, request, render_template_string
 from transformers import AutoTokenizer, AutoModel
 
 DEFAULT_TOP_K = 10
-
+DEFAULT_METADATA = "final/umls_metadata.csv"
+DEFAULT_INDEX = "final/umls_index_hnsw.faiss"
 
 def parse_args():
     p = argparse.ArgumentParser(description="UMLS similarity search web app")
-    p.add_argument("--metadata", required=True, help="Path to umls_metadata.csv")
-    p.add_argument("--index", required=True, help="Path to umls_index_hnsw.faiss")
+    p.add_argument("--metadata", default=DEFAULT_METADATA,
+                   help=f"Path to umls_metadata.csv (default: {DEFAULT_METADATA})")
+    p.add_argument("--index", default=DEFAULT_INDEX,
+                   help=f"Path to umls_index_hnsw.faiss (default: {DEFAULT_INDEX})")
     p.add_argument("--model", default="cambridgeltl/SapBERT-from-PubMedBERT-fulltext",
                    help="SapBERT model ID or local dir")
     p.add_argument("--ef_search", type=int, default=64,
