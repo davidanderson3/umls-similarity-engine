@@ -58,6 +58,9 @@ def encode_query(text, tokenizer, model, device):
         out = model(**enc)
         # out.last_hidden_state is (1, L, D); we take the [CLS] token at position 0
         cls_emb = out.last_hidden_state[:, 0, :].cpu().numpy().astype("float32")
+
+    # normalize so search distances are comparable to the index vectors
+    faiss.normalize_L2(cls_emb)
     return cls_emb  # shape (1, D)
 
 def main():
