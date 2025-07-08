@@ -16,6 +16,8 @@ length. Use ``--max_len`` to specify a different cutoff.
 
 Terms containing the substring "isomer" are excluded from the output, as
 these often describe different structural variants rather than true synonyms.
+Terms that contain parentheses are also excluded, since these often include
+qualifying information that does not indicate true synonymy.
 """
 
 import argparse
@@ -102,6 +104,13 @@ def main():
                     if len(strs[i]) > args.max_len or len(strs[j]) > args.max_len:
                         continue
                 if "isomer" in strs[i].lower() or "isomer" in strs[j].lower():
+                    continue
+                if (
+                    "(" in strs[i]
+                    or ")" in strs[i]
+                    or "(" in strs[j]
+                    or ")" in strs[j]
+                ):
                     continue
                 results.append((cuis[i], strs[i], cuis[j], strs[j], sim))
 
