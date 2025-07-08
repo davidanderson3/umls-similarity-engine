@@ -18,9 +18,9 @@ Terms containing the substring "isomer" are excluded from the output, as
 these often describe different structural variants rather than true synonyms.
 Terms that contain parentheses are also excluded, since these often include
 qualifying information that does not indicate true synonymy.
-
 Concepts belonging to the semantic types "Plant" or "Organic Chemical" are
 ignored, as these categories tend to produce many spurious matches.
+Candidates with no shared semantic types (STY) are skipped.
 """
 
 import argparse
@@ -29,6 +29,7 @@ import csv
 import numpy as np
 import pandas as pd
 import faiss
+import ast
 
 
 def parse_args():
@@ -131,6 +132,7 @@ def main():
             sim = 1.0 - float(dist) / 2.0
             if sim >= args.threshold and cuis[i] != cuis[j]:
                 if exclude_sty.intersection(stys[i]) or exclude_sty.intersection(stys[j]):
+                if not set(stys[i]).intersection(stys[j]):
                     continue
                 if args.max_len is not None:
                     if len(strs[i]) > args.max_len or len(strs[j]) > args.max_len:
