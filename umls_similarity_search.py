@@ -28,6 +28,12 @@ def parse_args():
                    help="Number of results to return")
     p.add_argument("--ef_search", type=int, default=64,
                    help="HNSW efSearch (higher=more accurate/slower)")
+    p.add_argument(
+        "--exclude_sty",
+        nargs="*",
+        default=[],
+        help="Semantic type names to exclude from results",
+    )
     return p.parse_args()
 
 def load_metadata(path):
@@ -68,6 +74,7 @@ def main():
 
     # 1) Load metadata
     cuis, terms, stys = load_metadata(args.metadata)
+    exclude_set = {s.lower() for s in args.exclude_sty}
 
     # 2) Load FAISS index
     index = faiss.read_index(args.index)
@@ -86,12 +93,19 @@ def main():
             break
 
         q_vec = encode_query(q, tokenizer, model, device)
-        D, I  = index.search(q_vec, args.top_k)
+        D, I  = index.search(q_vec, args.top_k * 5)
 
         print(f"\nTop {args.top_k} results for “{q}”:\n")
-        for rank, (idx, score) in enumerate(zip(I[0], D[0]), start=1):
-            sty_str = ", ".join(stys[idx])
-            print(f"{rank:2d}. {cuis[idx]}  {terms[idx]:<50}  {sty_str:<20}  {score:.4f}")
+        shown = 0
+        for idx, score in zip(I[0], D[0]):
+            sty_list = stys[idx]
+            if exclude_set and exclude_set.intersection(s.lower() for s in sty_list):
+                continue
+            sty_str = ", ".join(sty_list)
+            shown += 1
+            print(f"{shown:2d}. {cuis[idx]}  {terms[idx]:<50}  {sty_str:<20}  {score:.4f}")
+            if shown >= args.top_k:
+                break
 
 if __name__ == "__main__":
     main()
