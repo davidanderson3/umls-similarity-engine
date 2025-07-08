@@ -95,7 +95,8 @@ This will add the FAISS index:
      --metadata final/umls_metadata.csv \
      --index    final/umls_index_hnsw.faiss \
      --top_k    10 \
-     --ef_search 128
+     --ef_search 128 \
+     --exclude_sty "Plant" "Organic Chemical"
    ```
 
    **Web**:
@@ -103,7 +104,8 @@ This will add the FAISS index:
    python umls_similarity_web.py \
      --metadata final/umls_metadata.csv \
      --index    final/umls_index_hnsw.faiss \
-     --host 0.0.0.0 --port 5000
+     --host 0.0.0.0 --port 5000 \
+     --exclude_sty "Plant" "Organic Chemical"
    ```
    Navigate to http://127.0.0.1:5000 in your web browser. 
 ---

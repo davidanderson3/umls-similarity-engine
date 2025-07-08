@@ -25,6 +25,12 @@ def parse_args():
                    help="HNSW efSearch (higher=more accurate/slower)")
     p.add_argument("--host", default="0.0.0.0", help="Host for the web server")
     p.add_argument("--port", type=int, default=5000, help="Port for the web server")
+    p.add_argument(
+        "--exclude_sty",
+        nargs="*",
+        default=[],
+        help="Semantic type names to exclude from results",
+    )
     return p.parse_args()
 
 
@@ -63,6 +69,8 @@ def create_app(args):
     device = torch.device("cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
     model = AutoModel.from_pretrained(args.model).to(device).eval()
+
+    exclude_set = {s.lower() for s in args.exclude_sty}
 
     cuis, terms, stys = load_metadata(args.metadata)
 
@@ -159,6 +167,8 @@ def create_app(args):
             if max_score is not None and score > max_score:
                 continue
             sty_list = stys[idx]
+            if exclude_set and exclude_set.intersection(s.lower() for s in sty_list):
+                continue
             sty_set.update(sty_list)
             sty_str = ", ".join(sty_list)
             results.append((cuis[idx], terms[idx], sty_str, float(score), sty_list[0]))
