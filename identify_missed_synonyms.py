@@ -18,9 +18,13 @@ Terms containing the substring "isomer" are excluded from the output, as
 these often describe different structural variants rather than true synonyms.
 Terms that contain parentheses are also excluded, since these often include
 qualifying information that does not indicate true synonymy.
+
+Concepts belonging to the semantic types "Plant" or "Organic Chemical" are
+ignored, as these categories tend to produce many spurious matches.
 """
 
 import argparse
+import ast
 import csv
 import numpy as np
 import pandas as pd
@@ -67,21 +71,47 @@ def parse_args():
             " Defaults to 25."
         ),
     )
+    p.add_argument(
+        "--exclude_sty",
+        action="append",
+        default=[],
+        help=(
+            "Semantic type(s) to exclude from consideration. Can be"
+            " specified multiple times. Defaults to 'Plant' and 'Organic "
+            "Chemical' if omitted."
+        ),
+    )
     return p.parse_args()
 
 
 def load_metadata(path):
-    df = pd.read_csv(path, usecols=["CUI", "STR"]).dropna()
+    df = pd.read_csv(path, usecols=["CUI", "STR", "STY"]).dropna()
+
     cuis = df["CUI"].astype(str).tolist()
     strs = df["STR"].astype(str).tolist()
-    return cuis, strs
+
+    stys_raw = df["STY"].astype(str).tolist()
+    stys = []
+    for s in stys_raw:
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, list):
+                stys.append(parsed)
+            else:
+                stys.append([str(parsed)])
+        except Exception:
+            stys.append([s])
+
+    return cuis, strs, stys
 
 
 def main():
     args = parse_args()
 
-    cuis, strs = load_metadata(args.metadata)
+    cuis, strs, stys = load_metadata(args.metadata)
     n = len(cuis)
+
+    exclude_sty = set(args.exclude_sty or ["Plant", "Organic Chemical"])
 
     index = faiss.read_index(args.index)
 
@@ -100,6 +130,8 @@ def main():
             seen.add(pair)
             sim = 1.0 - float(dist) / 2.0
             if sim >= args.threshold and cuis[i] != cuis[j]:
+                if exclude_sty.intersection(stys[i]) or exclude_sty.intersection(stys[j]):
+                    continue
                 if args.max_len is not None:
                     if len(strs[i]) > args.max_len or len(strs[j]) > args.max_len:
                         continue
