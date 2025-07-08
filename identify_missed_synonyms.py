@@ -18,10 +18,13 @@ Terms containing the substring "isomer" are excluded from the output, as
 these often describe different structural variants rather than true synonyms.
 Terms that contain parentheses are also excluded, since these often include
 qualifying information that does not indicate true synonymy.
+Concepts belonging to the semantic types "Plant" or "Organic Chemical" are
+ignored, as these categories tend to produce many spurious matches.
 Candidates with no shared semantic types (STY) are skipped.
 """
 
 import argparse
+import ast
 import csv
 import numpy as np
 import pandas as pd
@@ -69,14 +72,25 @@ def parse_args():
             " Defaults to 25."
         ),
     )
-    # no arg for STY filtering; behaviour documented in module docstring
+    p.add_argument(
+        "--exclude_sty",
+        action="append",
+        default=[],
+        help=(
+            "Semantic type(s) to exclude from consideration. Can be"
+            " specified multiple times. Defaults to 'Plant' and 'Organic "
+            "Chemical' if omitted."
+        ),
+    )
     return p.parse_args()
 
 
 def load_metadata(path):
     df = pd.read_csv(path, usecols=["CUI", "STR", "STY"]).dropna()
+
     cuis = df["CUI"].astype(str).tolist()
     strs = df["STR"].astype(str).tolist()
+
     stys_raw = df["STY"].astype(str).tolist()
     stys = []
     for s in stys_raw:
@@ -88,6 +102,7 @@ def load_metadata(path):
                 stys.append([str(parsed)])
         except Exception:
             stys.append([s])
+
     return cuis, strs, stys
 
 
@@ -96,6 +111,8 @@ def main():
 
     cuis, strs, stys = load_metadata(args.metadata)
     n = len(cuis)
+
+    exclude_sty = set(args.exclude_sty or ["Plant", "Organic Chemical"])
 
     index = faiss.read_index(args.index)
 
@@ -114,6 +131,7 @@ def main():
             seen.add(pair)
             sim = 1.0 - float(dist) / 2.0
             if sim >= args.threshold and cuis[i] != cuis[j]:
+                if exclude_sty.intersection(stys[i]) or exclude_sty.intersection(stys[j]):
                 if not set(stys[i]).intersection(stys[j]):
                     continue
                 if args.max_len is not None:
