@@ -29,7 +29,6 @@ import csv
 import numpy as np
 import pandas as pd
 import faiss
-import ast
 
 
 def parse_args():
@@ -129,24 +128,31 @@ def main():
             if pair in seen:
                 continue
             seen.add(pair)
+
             sim = 1.0 - float(dist) / 2.0
-            if sim >= args.threshold and cuis[i] != cuis[j]:
-                if exclude_sty.intersection(stys[i]) or exclude_sty.intersection(stys[j]):
-                if not set(stys[i]).intersection(stys[j]):
-                    continue
-                if args.max_len is not None:
-                    if len(strs[i]) > args.max_len or len(strs[j]) > args.max_len:
-                        continue
-                if "isomer" in strs[i].lower() or "isomer" in strs[j].lower():
-                    continue
-                if (
-                    "(" in strs[i]
-                    or ")" in strs[i]
-                    or "(" in strs[j]
-                    or ")" in strs[j]
-                ):
-                    continue
-                results.append((cuis[i], strs[i], cuis[j], strs[j], sim))
+            if sim < args.threshold or cuis[i] == cuis[j]:
+                continue
+
+            # exclude unwanted semantic types entirely
+            if exclude_sty.intersection(stys[i]) or exclude_sty.intersection(stys[j]):
+                continue
+
+            # require at least one shared semantic type
+            if not set(stys[i]).intersection(stys[j]):
+                continue
+
+            # length cutoff
+            if args.max_len and (len(strs[i]) > args.max_len or len(strs[j]) > args.max_len):
+                continue
+
+            # filter isomers and parentheticals
+            low_i, low_j = strs[i].lower(), strs[j].lower()
+            if "isomer" in low_i or "isomer" in low_j:
+                continue
+            if "(" in strs[i] or ")" in strs[i] or "(" in strs[j] or ")" in strs[j]:
+                continue
+
+            results.append((cuis[i], strs[i], cuis[j], strs[j], sim))
 
     results.sort(key=lambda x: -x[4])
 
