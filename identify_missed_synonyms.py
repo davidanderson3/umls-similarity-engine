@@ -10,7 +10,9 @@ Outputs a CSV with the following columns:
     CUI1,STR1,CUI2,STR2,SIMILARITY
 
 Similarity is the cosine similarity computed from the L2-normalized vectors.
-Optionally filter results by maximum string length with ``--max_len``.
+Concepts with long preferred names are often poor candidates for synonymy.
+By default this script only considers terms 25 characters or fewer in
+length. Use ``--max_len`` to specify a different cutoff.
 """
 
 import argparse
@@ -54,8 +56,11 @@ def parse_args():
     p.add_argument(
         "--max_len",
         type=int,
-        default=None,
-        help="Maximum character length for STR fields to consider",
+        default=25,
+        help=(
+            "Maximum character length for STR fields to consider."
+            " Defaults to 25."
+        ),
     )
     return p.parse_args()
 
