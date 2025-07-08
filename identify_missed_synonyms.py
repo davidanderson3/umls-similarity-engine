@@ -13,6 +13,9 @@ Similarity is the cosine similarity computed from the L2-normalized vectors.
 Concepts with long preferred names are often poor candidates for synonymy.
 By default this script only considers terms 25 characters or fewer in
 length. Use ``--max_len`` to specify a different cutoff.
+
+Terms containing the substring "isomer" are excluded from the output, as
+these often describe different structural variants rather than true synonyms.
 """
 
 import argparse
@@ -98,6 +101,8 @@ def main():
                 if args.max_len is not None:
                     if len(strs[i]) > args.max_len or len(strs[j]) > args.max_len:
                         continue
+                if "isomer" in strs[i].lower() or "isomer" in strs[j].lower():
+                    continue
                 results.append((cuis[i], strs[i], cuis[j], strs[j], sim))
 
     results.sort(key=lambda x: -x[4])
