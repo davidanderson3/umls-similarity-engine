@@ -18,6 +18,7 @@ Terms containing the substring "isomer" are excluded from the output, as
 these often describe different structural variants rather than true synonyms.
 Terms that contain parentheses are also excluded, since these often include
 qualifying information that does not indicate true synonymy.
+Candidates with no shared semantic types (STY) are skipped.
 """
 
 import argparse
@@ -25,6 +26,7 @@ import csv
 import numpy as np
 import pandas as pd
 import faiss
+import ast
 
 
 def parse_args():
@@ -67,20 +69,32 @@ def parse_args():
             " Defaults to 25."
         ),
     )
+    # no arg for STY filtering; behaviour documented in module docstring
     return p.parse_args()
 
 
 def load_metadata(path):
-    df = pd.read_csv(path, usecols=["CUI", "STR"]).dropna()
+    df = pd.read_csv(path, usecols=["CUI", "STR", "STY"]).dropna()
     cuis = df["CUI"].astype(str).tolist()
     strs = df["STR"].astype(str).tolist()
-    return cuis, strs
+    stys_raw = df["STY"].astype(str).tolist()
+    stys = []
+    for s in stys_raw:
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, list):
+                stys.append(parsed)
+            else:
+                stys.append([str(parsed)])
+        except Exception:
+            stys.append([s])
+    return cuis, strs, stys
 
 
 def main():
     args = parse_args()
 
-    cuis, strs = load_metadata(args.metadata)
+    cuis, strs, stys = load_metadata(args.metadata)
     n = len(cuis)
 
     index = faiss.read_index(args.index)
@@ -100,6 +114,8 @@ def main():
             seen.add(pair)
             sim = 1.0 - float(dist) / 2.0
             if sim >= args.threshold and cuis[i] != cuis[j]:
+                if not set(stys[i]).intersection(stys[j]):
+                    continue
                 if args.max_len is not None:
                     if len(strs[i]) > args.max_len or len(strs[j]) > args.max_len:
                         continue
