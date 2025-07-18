@@ -12,7 +12,6 @@ import argparse
 import ast
 import pandas as pd
 import faiss
-import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel
 

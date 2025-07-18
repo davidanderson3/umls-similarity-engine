@@ -4,7 +4,6 @@ import argparse
 import ast
 import faiss
 import pandas as pd
-import numpy as np
 import torch
 from flask import Flask, request, render_template_string
 from transformers import AutoTokenizer, AutoModel
