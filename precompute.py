@@ -17,8 +17,6 @@ Outputs a CSV with columns: CUI,STR,TUI,STY
 """
 
 import argparse
-import csv
-import json
 from collections import defaultdict
 import pandas as pd
 
@@ -80,9 +78,6 @@ def main():
     # 1) Load & filter MRCONSO
     conso = load_conso(args.mrconso)
     # conso is [(CUI,STR),...]
-    # build DataFrame
-    df_conso = pd.DataFrame(conso, columns=["CUI","STR"])
-
     # 2) Load MRSTY and aggregate per CUI
     sty_map = load_sty(args.mrsty)
     records = []
