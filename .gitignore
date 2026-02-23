@@ -1,0 +1,9 @@
+.zsh_history
+Miniconda3-latest-MacOSX-x86_64.sh
+.venv
+final
+output
+.DS_Store
+data/bioconceptvec/concept_cbow.json
+data/cui2vec/cui2vec_pretrained.csv
+Miniconda3-latest-MacOSX-arm64.sh

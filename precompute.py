@@ -18,7 +18,8 @@ Outputs a CSV with columns: CUI,STR,TUI,STY
 
 import argparse
 from collections import defaultdict
-import pandas as pd
+import csv
+import os
 
 def load_conso(path):
     """
@@ -92,10 +93,16 @@ def main():
             "STY": repr(stys)
         })
 
-    # 3) Write out
-    df_out = pd.DataFrame(records, columns=["CUI","STR","TUI","STY"])
-    df_out.to_csv(args.out, index=False)
-    print(f"Wrote {len(df_out)} rows to {args.out}")
+    # 3) Write out (use csv module to avoid pandas type issues)
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    with open(args.out, "w", newline="", encoding="utf8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["CUI", "STR", "TUI", "STY"])
+        for rec in records:
+            writer.writerow([rec["CUI"], rec["STR"], rec["TUI"], rec["STY"]])
+    print(f"Wrote {len(records)} rows to {args.out}")
 
 if __name__ == "__main__":
     main()
