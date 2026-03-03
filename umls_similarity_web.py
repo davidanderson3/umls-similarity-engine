@@ -803,8 +803,8 @@ def create_app(args):
             status_msg = (
                 "Mode: Ensemble. "
                 f"Candidates sapbert={len(d1)}, bioconceptvec={len(d2)}, cui2vec={len(d3)}. "
-                f"Weights=({w1:.2f},{w2:.2f},{w3:.2f}), "
-                f"MRREL base boost={args.mrrel_boost:.2f}, MRREL combo boost={args.mrrel_count_boost:.2f}."
+                f"Weights=({w1},{w2},{w3}), "
+                f"MRREL base boost={args.mrrel_boost}, MRREL combo boost={args.mrrel_count_boost}."
             )
 
         results = []
