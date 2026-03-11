@@ -19,6 +19,39 @@ DEFAULT_TOP_K = 10
 DEFAULT_METADATA = "final/umls_metadata.csv"
 DEFAULT_INDEX = "final/umls_index_hnsw.faiss"
 EXCLUDED_SEMANTIC_TYPES = {"Clinical Drug", "Intellectual Product"}
+RESOLVER_EXCLUDED_SEMANTIC_TYPES = {
+    "Biomedical Occupation or Discipline",
+    "Clinical Attribute",
+    "Finding",
+    "Health Care Activity",
+    "Intellectual Product",
+    "Medical Device",
+    "Professional or Occupational Group",
+}
+RESOLVER_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "in", "into",
+    "is", "it", "its", "of", "on", "or", "that", "the", "their", "this", "those", "to",
+    "was", "were", "which", "while", "with", "within",
+}
+RESOLVER_GENERIC_TOKENS = {
+    "cancer", "cell", "cells", "change", "changes", "clinical", "communication", "complexity",
+    "course", "disease", "diseases", "disorder", "disorders", "dynamic", "effective",
+    "editorial", "environmental", "evolving", "function", "genetic", "management",
+    "involve", "involved", "involves", "mechanism", "mechanisms", "molecular", "nature", "network", "networks", "obstacle",
+    "obstacles", "pathway", "pathways", "patient", "patients", "plastic", "presence",
+    "progression", "research", "resistance", "review", "reviews", "series", "signal",
+    "signaling", "spread", "strategy", "strategies", "study", "studies", "substantial",
+    "therapeutic", "therapy", "therapies", "transition", "treatment", "treatments", "tumor", "tumors",
+    "tumour", "tumours", "understanding", "variability",
+}
+RESOLVER_EDGE_TOKENS = RESOLVER_STOPWORDS | {
+    "ability", "arises", "arise", "based", "core", "course", "create", "creates", "creating",
+    "critical", "dedicated", "despite", "diverse", "drive", "driven", "drives", "effective",
+    "emerging", "evolving", "highlighted", "impacting", "influences", "intrinsic", "making",
+    "involve", "involved", "involves", "nature", "necessity", "new", "notably", "obstacles",
+    "part", "presents", "presence",
+    "precise", "proposing", "role", "roles", "series", "substantial", "such", "understanding",
+}
 
 
 def parse_args():
@@ -76,6 +109,14 @@ def parse_args():
                    help="For bioconceptvec/cui2vec, split long queries when length exceeds this")
     p.add_argument("--chunk_max_segments", type=int, default=8,
                    help="Maximum number of query segments to use after splitting")
+    p.add_argument("--resolver_chunk_max_words", type=int, default=6,
+                   help="When the resolver misses on a segment, retry with smaller word chunks up to this size")
+    p.add_argument("--resolver_chunk_min_words", type=int, default=2,
+                   help="Smallest word chunk size to try for resolver fallback")
+    p.add_argument("--resolver_chunk_max_queries", type=int, default=12,
+                   help="Maximum resolver API queries to spend per segment, including the original segment")
+    p.add_argument("--resolver_max_hits_per_segment", type=int, default=3,
+                   help="Maximum validated resolver hits to keep per segment for BioConceptVec/cui2vec seeding")
 
     p.add_argument("--ef_search", type=int, default=64, help="HNSW efSearch")
     p.add_argument("--cross_type_only", action="store_true",
@@ -137,6 +178,7 @@ def encode_query(text, tokenizer, model, device):
 
 
 _space_re = re.compile(r"\s+")
+_token_re = re.compile(r"[a-z0-9]+")
 
 
 def norm_term(s: str) -> str:
@@ -157,6 +199,140 @@ def split_query_segments(query: str, min_chars: int, max_segments: int):
     if not parts:
         return [q]
     return parts[:max(1, max_segments)]
+
+
+def tokenize_text(text: str):
+    return _token_re.findall((text or "").lower())
+
+
+def normalize_token(token: str):
+    t = (token or "").lower()
+    if len(t) > 4 and t.endswith("ies"):
+        t = t[:-3] + "y"
+    elif len(t) > 5 and t.endswith("ing"):
+        t = t[:-3]
+    elif len(t) > 4 and t.endswith("ed"):
+        t = t[:-2]
+    elif len(t) > 6 and t.endswith("ality"):
+        t = t[:-5]
+    elif len(t) > 5 and t.endswith("ity"):
+        t = t[:-3]
+    elif len(t) > 4 and t.endswith("al"):
+        t = t[:-2]
+    elif len(t) > 5 and t.endswith("tion"):
+        t = t[:-4]
+    elif len(t) > 4 and t.endswith("s"):
+        t = t[:-1]
+    return t
+
+
+def is_generic_resolver_token(token: str):
+    t = (token or "").lower()
+    return t in RESOLVER_GENERIC_TOKENS or normalize_token(t) in RESOLVER_GENERIC_TOKENS
+
+
+def analyze_resolver_text(text: str):
+    tokens = tokenize_text(text)
+    content_tokens = [t for t in tokens if len(t) >= 3 and t not in RESOLVER_STOPWORDS]
+    content_sigs = {normalize_token(t) for t in content_tokens if normalize_token(t)}
+    distinctive_sigs = {
+        normalize_token(t)
+        for t in content_tokens
+        if normalize_token(t) and not is_generic_resolver_token(t)
+    }
+    generic_count = sum(1 for t in content_tokens if is_generic_resolver_token(t))
+    return {
+        "tokens": tokens,
+        "content_count": len(content_tokens),
+        "content_sigs": content_sigs,
+        "distinctive_sigs": distinctive_sigs,
+        "generic_count": generic_count,
+    }
+
+
+def clean_resolver_chunk(text: str):
+    words = [w.strip(" \t\r\n,;:.!?()[]{}\"'") for w in (text or "").split()]
+    words = [w for w in words if w]
+    while words and (normalize_token(words[0]) in RESOLVER_EDGE_TOKENS or len(words[0]) <= 2):
+        words.pop(0)
+    while words and (normalize_token(words[-1]) in RESOLVER_EDGE_TOKENS or len(words[-1]) <= 2):
+        words.pop()
+    return _space_re.sub(" ", " ".join(words)).strip()
+
+
+def is_informative_resolver_chunk(text: str):
+    info = analyze_resolver_text(text)
+    if info["content_count"] < 2:
+        return False
+    if not info["distinctive_sigs"]:
+        return False
+    if len(info["distinctive_sigs"]) == 1 and info["content_count"] > 4:
+        return False
+    if info["generic_count"] >= info["content_count"]:
+        return False
+    return True
+
+
+def build_resolver_query_levels(query: str, max_words: int, min_words: int, max_queries: int):
+    q = _space_re.sub(" ", (query or "").strip())
+    if not q:
+        return []
+
+    max_queries = max(1, max_queries)
+    levels = [[q]]
+    if max_queries == 1:
+        return levels
+
+    seen = {q}
+    min_words = max(1, min_words)
+    max_words = max(min_words, max_words)
+    candidate_count = 1
+    direct_level = []
+    level_map = {}
+
+    phrases = [clean_resolver_chunk(p) for p in re.split(r"(?i)[,;]|\b(?:and|or|which|that|including|notably|while)\b", q)]
+    for phrase in phrases:
+        if not phrase or phrase in seen:
+            continue
+        words = phrase.split()
+        if len(words) <= max_words:
+            if is_informative_resolver_chunk(phrase):
+                direct_level.append(phrase)
+                seen.add(phrase)
+                candidate_count += 1
+                if candidate_count >= max_queries:
+                    break
+            continue
+
+        upper = min(max_words, len(words))
+        for size in range(upper, min_words - 1, -1):
+            if candidate_count >= max_queries:
+                break
+            for start in range(0, len(words) - size + 1):
+                chunk = clean_resolver_chunk(" ".join(words[start:start + size]))
+                if not chunk or chunk in seen or not is_informative_resolver_chunk(chunk):
+                    continue
+                level_map.setdefault(size, []).append(chunk)
+                seen.add(chunk)
+                candidate_count += 1
+                if candidate_count >= max_queries:
+                    break
+        if candidate_count >= max_queries:
+            break
+
+    if direct_level:
+        direct_level.sort(
+            key=lambda chunk: (
+                len(analyze_resolver_text(chunk)["distinctive_sigs"]),
+                -analyze_resolver_text(chunk)["generic_count"],
+                len(chunk.split()),
+            ),
+            reverse=True,
+        )
+        levels.append(direct_level)
+    for size in sorted(level_map.keys(), reverse=True):
+        levels.append(level_map[size])
+    return levels
 
 
 def load_line_list(path: str):
@@ -290,7 +466,7 @@ def _extract_rows_from_payload(payload, results_key):
     return rows
 
 
-def _call_umls_api(query: str, args):
+def _call_umls_api(query: str, args, fuzzy_override=None):
     base = args.umls_api_base_url.rstrip("/")
     if not base:
         return []
@@ -299,8 +475,10 @@ def _call_umls_api(query: str, args):
         args.umls_api_limit_param: str(args.umls_api_limit),
         args.umls_api_size_param: str(args.umls_api_limit),
         args.umls_api_page_param: str(args.umls_api_page),
-        args.umls_api_fuzzy_param: str(args.umls_api_fuzzy),
     }
+    if args.umls_api_fuzzy_param:
+        fuzzy_value = args.umls_api_fuzzy if fuzzy_override is None else fuzzy_override
+        params[args.umls_api_fuzzy_param] = str(fuzzy_value)
     url = base + args.umls_api_search_path + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=args.umls_api_timeout) as resp:
@@ -309,38 +487,229 @@ def _call_umls_api(query: str, args):
     return rows if isinstance(rows, list) else []
 
 
-def resolve_with_umls_api(query: str, args):
-    rows = _call_umls_api(query, args)
-    out = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        codes = r.get("codes", [])
+def _extract_semantic_types(row):
+    sty = row.get("STY", row.get("sty", [])) if isinstance(row, dict) else []
+    if isinstance(sty, list):
+        return [str(x) for x in sty if str(x)]
+    if isinstance(sty, str) and sty.strip():
+        return [sty.strip()]
+    return []
+
+
+def _row_text_signatures(row):
+    texts = []
+    if isinstance(row, dict):
+        pref = str(row.get("preferred_name", "") or row.get("name", "") or "").strip()
+        if pref:
+            texts.append(pref)
+        codes = row.get("codes", [])
         if isinstance(codes, list):
             for c in codes:
                 if not isinstance(c, dict):
                     continue
-                sab = canonical_sab(str(c.get(args.umls_api_sab_field, "") or c.get("SAB", "") or c.get("rootSource", "") or c.get("source", "") or c.get("sab", "")))
-                code = str(c.get(args.umls_api_code_field, "") or c.get("CODE", "") or c.get("code", "") or c.get("ui", "") or c.get("sourceUi", "")).strip()
-                if sab in ("MSH", "OMIM") and code:
-                    out.append((sab, code))
-        sab = canonical_sab(str(r.get(args.umls_api_sab_field, "") or r.get("SAB", "") or r.get("rootSource", "") or r.get("source", "") or r.get("sab", "")))
-        code = str(r.get(args.umls_api_code_field, "") or r.get("CODE", "") or r.get("code", "") or r.get("ui", "") or r.get("sourceUi", "")).strip()
-        if sab in ("MSH", "OMIM") and code:
-            out.append((sab, code))
+                c_pref = str(c.get("preferred_name", "") or "").strip()
+                if c_pref:
+                    texts.append(c_pref)
+                strings = c.get("strings", [])
+                if isinstance(strings, list):
+                    texts.extend(str(x) for x in strings if str(x))
+    sigs = set()
+    for text in texts:
+        for token in tokenize_text(text):
+            if token in RESOLVER_STOPWORDS:
+                continue
+            sig = normalize_token(token)
+            if sig:
+                sigs.add(sig)
+    return sigs
+
+
+def _resolver_score_value(row):
+    try:
+        return float(row.get("_customScore") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _is_truthy_string(value):
+    return str(value).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _should_try_exact_first(query_info, is_root_query):
+    if is_root_query:
+        return False
+    return len(query_info["tokens"]) <= 4 and bool(query_info["distinctive_sigs"])
+
+
+def _should_allow_fuzzy(query_info, is_root_query, args):
+    if is_root_query:
+        return _is_truthy_string(args.umls_api_fuzzy)
+    if not _is_truthy_string(args.umls_api_fuzzy):
+        return False
+    if not query_info["distinctive_sigs"]:
+        return False
+    return query_info["generic_count"] < query_info["content_count"]
+
+
+def _score_resolver_row(query_text: str, row):
+    query_info = analyze_resolver_text(query_text)
+    sty_list = _extract_semantic_types(row)
+    if any(sty in RESOLVER_EXCLUDED_SEMANTIC_TYPES for sty in sty_list):
+        return None
+
+    row_sigs = _row_text_signatures(row)
+    if not row_sigs:
+        return None
+
+    distinct_shared = query_info["distinctive_sigs"] & row_sigs
+    if not distinct_shared:
+        return None
+
+    content_shared = query_info["content_sigs"] & row_sigs
+    if len(content_shared) == 1 and query_info["content_count"] > 4:
+        return None
+
+    norm_query = norm_term(query_text)
+    exact_name_match = 0
+    preferred = str(row.get("preferred_name", "") or row.get("name", "") or "").strip()
+    if preferred and norm_term(preferred) == norm_query:
+        exact_name_match = 1
+    codes = row.get("codes", [])
+    if isinstance(codes, list):
+        for c in codes:
+            if not isinstance(c, dict):
+                continue
+            strings = c.get("strings", [])
+            if isinstance(strings, list) and any(norm_term(str(s)) == norm_query for s in strings):
+                exact_name_match = 1
+                break
+
+    match_type = str(row.get("matchType", "") or "").strip().lower()
+    exact_bonus = 1 if match_type == "exact" else 0
+    return (
+        exact_name_match,
+        len(distinct_shared),
+        len(content_shared),
+        exact_bonus,
+        _resolver_score_value(row),
+    )
+
+
+def _row_cui(row):
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("CUI", "") or row.get("cui", "")).strip()
+
+
+def _extract_source_codes_from_row(row, args):
+    out = []
+    if not isinstance(row, dict):
+        return out
+    codes = row.get("codes", [])
+    if isinstance(codes, list):
+        for c in codes:
+            if not isinstance(c, dict):
+                continue
+            sab = canonical_sab(str(c.get(args.umls_api_sab_field, "") or c.get("SAB", "") or c.get("rootSource", "") or c.get("source", "") or c.get("sab", "")))
+            code = str(c.get(args.umls_api_code_field, "") or c.get("CODE", "") or c.get("code", "") or c.get("ui", "") or c.get("sourceUi", "")).strip()
+            if sab in ("MSH", "OMIM") and code:
+                out.append((sab, code))
+    sab = canonical_sab(str(row.get(args.umls_api_sab_field, "") or row.get("SAB", "") or row.get("rootSource", "") or row.get("source", "") or row.get("sab", "")))
+    code = str(row.get(args.umls_api_code_field, "") or row.get("CODE", "") or row.get("code", "") or row.get("ui", "") or row.get("sourceUi", "")).strip()
+    if sab in ("MSH", "OMIM") and code:
+        out.append((sab, code))
     return out
+
+
+def _extract_cui_from_row(row):
+    cui = _row_cui(row)
+    return cui if cui.startswith("C") else ""
+
+
+def _resolve_with_umls_api_fallback(query: str, args):
+    kept_rows = []
+    api_queries_tried = 0
+    hit_queries = []
+    levels = build_resolver_query_levels(
+        query,
+        args.resolver_chunk_max_words,
+        args.resolver_chunk_min_words,
+        args.resolver_chunk_max_queries,
+    )
+    budget = max(1, args.resolver_chunk_max_queries)
+    for level_idx, level in enumerate(levels):
+        if api_queries_tried >= budget:
+            break
+        level_candidates = []
+        level_hits = set()
+        for subquery in level:
+            if api_queries_tried >= budget:
+                break
+            query_info = analyze_resolver_text(subquery)
+            modes = []
+            if _should_try_exact_first(query_info, is_root_query=(level_idx == 0)):
+                modes.append("false")
+            if _should_allow_fuzzy(query_info, is_root_query=(level_idx == 0), args=args):
+                fuzzy_mode = None if level_idx == 0 else str(args.umls_api_fuzzy)
+                modes.append(fuzzy_mode)
+            elif not modes:
+                modes.append("false")
+
+            seen_modes = set()
+            ordered_modes = []
+            for mode in modes:
+                key = "__default__" if mode is None else str(mode).lower()
+                if key in seen_modes:
+                    continue
+                seen_modes.add(key)
+                ordered_modes.append(mode)
+
+            matched_rows = []
+            for mode in ordered_modes:
+                if api_queries_tried >= budget:
+                    break
+                rows = _call_umls_api(subquery, args, fuzzy_override=mode)
+                api_queries_tried += 1
+                scored = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    score = _score_resolver_row(subquery, row)
+                    if score is None:
+                        continue
+                    scored.append((score, row))
+                if scored:
+                    matched_rows = scored
+                    break
+
+            if matched_rows:
+                level_hits.add(subquery)
+                for score, row in matched_rows:
+                    level_candidates.append((score, subquery, row))
+
+        if level_candidates:
+            seen_cuis = set()
+            level_candidates.sort(key=lambda x: x[0], reverse=True)
+            for score, subquery, row in level_candidates:
+                cui = _row_cui(row)
+                cui_key = cui or f"ROW::{subquery}::{row.get('preferred_name', '')}"
+                if cui_key in seen_cuis:
+                    continue
+                seen_cuis.add(cui_key)
+                kept_rows.append(row)
+                if len(kept_rows) >= max(1, args.resolver_max_hits_per_segment):
+                    break
+            hit_queries.extend(sorted(level_hits))
+            break
+    return kept_rows, api_queries_tried, hit_queries
+
+
+def resolve_with_umls_api(query: str, args):
+    return _resolve_with_umls_api_fallback(query, args)
 
 
 def resolve_cuis_with_umls_api(query: str, args):
-    rows = _call_umls_api(query, args)
-    out = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        cui = str(r.get("CUI", "") or r.get("cui", "")).strip()
-        if cui.startswith("C"):
-            out.append(cui)
-    return out
+    return _resolve_with_umls_api_fallback(query, args)
 
 
 def normalize_distance_map(dist_map):
@@ -449,22 +818,44 @@ def create_app(args):
             status_msg = f"Mode: BioConceptVec (exact resolver). Segments used: {len(segments)}."
         else:
             try:
-                resolved_total = []
+                resolved_rows = []
+                resolver_queries_tried = 0
+                resolver_hit_queries = 0
+                fallback_segments = 0
                 for seg in segments:
-                    resolved = resolve_with_umls_api(seg, args)
-                    resolved_total.extend(resolved)
-                    for sab, code in resolved:
-                        seed_ids.extend(concept_ids_from_source(sab, code))
-                        seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
-                if resolved_total:
-                    top_sab, top_code = resolved_total[0]
-                    top_cuis = list(source_to_cuis.get((top_sab, top_code), []))
-                    if top_cuis:
-                        _, q_stys = cui_to_info.get(top_cuis[0], ("", []))
+                    matched_rows, tried_query_count, hit_queries = resolve_with_umls_api(seg, args)
+                    resolved_rows.extend(matched_rows)
+                    resolver_queries_tried += tried_query_count
+                    resolver_hit_queries += len(hit_queries)
+                    if tried_query_count > 1:
+                        fallback_segments += 1
+                    for row in matched_rows:
+                        row_cui = _extract_cui_from_row(row)
+                        if row_cui:
+                            seed_cuis.append(row_cui)
+                            for sab, code in sorted(cui_to_sources.get(row_cui, set())):
+                                seed_ids.extend(concept_ids_from_source(sab, code))
+                                seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
+                        for sab, code in _extract_source_codes_from_row(row, args):
+                            seed_ids.extend(concept_ids_from_source(sab, code))
+                            seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
+                if resolved_rows:
+                    top_cui = _extract_cui_from_row(resolved_rows[0])
+                    if not top_cui:
+                        source_codes = _extract_source_codes_from_row(resolved_rows[0], args)
+                        for sab, code in source_codes:
+                            linked_cuis = list(source_to_cuis.get((sab, code), []))
+                            if linked_cuis:
+                                top_cui = linked_cuis[0]
+                                break
+                    if top_cui:
+                        _, q_stys = cui_to_info.get(top_cui, ("", []))
                         query_group = dominant_group(q_stys)
                 status_msg = (
                     f"Mode: BioConceptVec (API resolver). Segments used: {len(segments)}. "
-                    f"Resolver returned {len(resolved_total)} source codes; {len(seed_ids)} seed IDs after expansion."
+                    f"Resolver queries tried: {resolver_queries_tried}, matched chunks: {resolver_hit_queries}, "
+                    f"fallback segments: {fallback_segments}. "
+                    f"Validated resolver hits: {len(resolved_rows)}; {len(seed_ids)} seed IDs after expansion."
                 )
             except Exception as e:
                 return {}, [], f"Resolver API error: {e}"
@@ -518,14 +909,28 @@ def create_app(args):
             status_msg = f"Mode: cui2vec (exact resolver). Segments used: {len(segments)}."
         else:
             try:
-                resolved_total = []
+                resolved_rows = []
+                resolver_queries_tried = 0
+                resolver_hit_queries = 0
+                fallback_segments = 0
                 for seg in segments:
-                    resolved_cuis = resolve_cuis_with_umls_api(seg, args)
-                    resolved_total.extend(resolved_cuis)
-                seed_cuis.extend(resolved_total)
+                    matched_rows, tried_query_count, hit_queries = resolve_cuis_with_umls_api(seg, args)
+                    resolved_rows.extend(matched_rows)
+                    resolver_queries_tried += tried_query_count
+                    resolver_hit_queries += len(hit_queries)
+                    if tried_query_count > 1:
+                        fallback_segments += 1
+                for row in resolved_rows:
+                    cui = _extract_cui_from_row(row)
+                    if cui:
+                        seed_cuis.append(cui)
+                    for sab, code in _extract_source_codes_from_row(row, args):
+                        seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
                 status_msg = (
                     f"Mode: cui2vec (API resolver). Segments used: {len(segments)}. "
-                    f"Resolver returned {len(resolved_total)} CUIs."
+                    f"Resolver queries tried: {resolver_queries_tried}, matched chunks: {resolver_hit_queries}, "
+                    f"fallback segments: {fallback_segments}. "
+                    f"Validated resolver hits: {len(resolved_rows)}; {len(seed_cuis)} seed CUIs."
                 )
             except Exception as e:
                 return {}, [], f"Resolver API error: {e}"
