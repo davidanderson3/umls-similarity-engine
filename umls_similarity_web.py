@@ -53,6 +53,22 @@ RESOLVER_EDGE_TOKENS = RESOLVER_STOPWORDS | {
     "precise", "proposing", "role", "roles", "series", "substantial", "such", "understanding",
 }
 
+TREATMENT_INTENT_TOKENS = {
+    "treat", "treatment", "therapy", "therapeutic", "manage", "management",
+    "medication", "medicine", "drug", "drugs", "agent", "agents",
+}
+DIAGNOSTIC_INTENT_TOKENS = {
+    "diagnosis", "diagnostic", "screen", "screening", "test", "testing", "detect",
+}
+
+LOW_SIGNAL_GROUP_MULTIPLIER = {
+    "Concepts & Ideas": 0.65,
+    "Geographic Areas": 0.45,
+    "Objects": 0.60,
+    "Occupations": 0.45,
+    "Organizations": 0.45,
+}
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="UMLS similarity search web app")
@@ -88,8 +104,8 @@ def parse_args():
     p.add_argument("--mrrel_rela", default="",
                    help="Comma-separated RELA filter for MRREL boost (optional)")
 
-    p.add_argument("--resolver", choices=["exact", "umls_api"], default="exact",
-                   help="Resolver used for bioconceptvec/cui2vec/ensemble modes")
+    p.add_argument("--resolver", choices=["exact", "sapbert", "umls_api"], default="exact",
+                   help="Resolver used for bioconceptvec/cui2vec/ensemble modes (umls_api kept as alias)")
     p.add_argument("--umls_api_base_url", default="", help="Base URL for local UMLS resolver API")
     p.add_argument("--umls_api_search_path", default="/search", help="Resolver API path")
     p.add_argument("--umls_api_query_param", default="q", help="Resolver API query parameter for input text")
@@ -723,6 +739,95 @@ def normalize_distance_map(dist_map):
     return {k: (hi - v) / (hi - lo) for k, v in dist_map.items()}
 
 
+def infer_query_semantic_profile(query, seed_cuis, term_to_cui, cui_to_info, sty_to_group):
+    tokens = set(tokenize_text(query))
+    treatment_intent = bool(tokens & TREATMENT_INTENT_TOKENS)
+    diagnostic_intent = bool(tokens & DIAGNOSTIC_INTENT_TOKENS)
+
+    group_counts = defaultdict(int)
+    for cui in sorted(set(seed_cuis or [])):
+        _, sty_list = cui_to_info.get(cui, ("", []))
+        for sty in sty_list:
+            group = sty_to_group.get(sty)
+            if group:
+                group_counts[group] += 1
+
+    if not group_counts:
+        q_cui = term_to_cui.get(norm_term(query or ""))
+        if q_cui:
+            _, sty_list = cui_to_info.get(q_cui, ("", []))
+            for sty in sty_list:
+                group = sty_to_group.get(sty)
+                if group:
+                    group_counts[group] += 1
+
+    dominant_group = None
+    if group_counts:
+        dominant_group = sorted(group_counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
+
+    return {
+        "dominant_group": dominant_group,
+        "treatment_intent": treatment_intent,
+        "diagnostic_intent": diagnostic_intent,
+    }
+
+
+def semantic_compatibility_multiplier(candidate_groups, query_profile, support_count):
+    groups = {g for g in candidate_groups if g and g != "Unknown"}
+    if not groups:
+        return 0.75
+
+    low_signal = 1.0
+    for group in groups:
+        low_signal = min(low_signal, LOW_SIGNAL_GROUP_MULTIPLIER.get(group, 1.0))
+
+    dominant = query_profile.get("dominant_group")
+    if not dominant:
+        return low_signal
+    if dominant in groups:
+        return low_signal
+
+    treatment_intent = query_profile.get("treatment_intent", False)
+    diagnostic_intent = query_profile.get("diagnostic_intent", False)
+
+    cross = 0.72
+    if dominant == "Disorders":
+        if "Chemicals & Drugs" in groups or "Procedures" in groups:
+            cross = 0.96 if treatment_intent else 0.78
+        elif "Genes & Molecular Sequences" in groups or "Physiology" in groups:
+            cross = 0.82
+        elif "Anatomy" in groups:
+            cross = 0.70
+        else:
+            cross = 0.68
+    elif dominant == "Chemicals & Drugs":
+        if "Disorders" in groups:
+            cross = 0.92 if (treatment_intent or diagnostic_intent) else 0.85
+        elif "Procedures" in groups:
+            cross = 0.80
+        elif "Genes & Molecular Sequences" in groups or "Physiology" in groups:
+            cross = 0.82
+        else:
+            cross = 0.70
+    elif dominant == "Procedures":
+        if "Disorders" in groups:
+            cross = 0.90
+        elif "Chemicals & Drugs" in groups:
+            cross = 0.86
+        else:
+            cross = 0.76
+    else:
+        if groups & {"Disorders", "Chemicals & Drugs", "Procedures", "Physiology", "Genes & Molecular Sequences"}:
+            cross = 0.83
+        else:
+            cross = 0.65
+
+    mult = cross * low_signal
+    if support_count >= 2 and mult < 0.95:
+        mult = min(0.95, mult + 0.07)
+    return max(0.25, mult)
+
+
 def create_app(args):
     try:
         faiss.omp_set_num_threads(1)
@@ -797,6 +902,22 @@ def create_app(args):
             seed_cuis = [q_cui]
         return dist, seed_cuis, "Mode: SapBERT."
 
+    def _seed_cuis_from_sapbert_segment(seg: str):
+        if not seg:
+            return []
+        # Pull a wider SapBERT candidate pool, then keep only high-quality unique CUIs.
+        search_k = max(50, max(1, args.resolver_max_hits_per_segment) * 20)
+        sap_dist, _, _ = run_sapbert(seg, search_k)
+        out = []
+        for cui, _ in sorted(sap_dist.items(), key=lambda x: x[1]):
+            _, sty_list = cui_to_info.get(cui, ("", []))
+            if any(sty in RESOLVER_EXCLUDED_SEMANTIC_TYPES for sty in sty_list):
+                continue
+            out.append(cui)
+            if len(out) >= max(1, args.resolver_max_hits_per_segment):
+                break
+        return out
+
     def run_bioconceptvec(query, top_k):
         if bc_index is None:
             return {}, [], "BioConceptVec index not loaded."
@@ -817,48 +938,28 @@ def create_app(args):
                     query_group = dominant_group(q_stys)
             status_msg = f"Mode: BioConceptVec (exact resolver). Segments used: {len(segments)}."
         else:
-            try:
-                resolved_rows = []
-                resolver_queries_tried = 0
-                resolver_hit_queries = 0
-                fallback_segments = 0
-                for seg in segments:
-                    matched_rows, tried_query_count, hit_queries = resolve_with_umls_api(seg, args)
-                    resolved_rows.extend(matched_rows)
-                    resolver_queries_tried += tried_query_count
-                    resolver_hit_queries += len(hit_queries)
-                    if tried_query_count > 1:
-                        fallback_segments += 1
-                    for row in matched_rows:
-                        row_cui = _extract_cui_from_row(row)
-                        if row_cui:
-                            seed_cuis.append(row_cui)
-                            for sab, code in sorted(cui_to_sources.get(row_cui, set())):
-                                seed_ids.extend(concept_ids_from_source(sab, code))
-                                seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
-                        for sab, code in _extract_source_codes_from_row(row, args):
-                            seed_ids.extend(concept_ids_from_source(sab, code))
-                            seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
-                if resolved_rows:
-                    top_cui = _extract_cui_from_row(resolved_rows[0])
-                    if not top_cui:
-                        source_codes = _extract_source_codes_from_row(resolved_rows[0], args)
-                        for sab, code in source_codes:
-                            linked_cuis = list(source_to_cuis.get((sab, code), []))
-                            if linked_cuis:
-                                top_cui = linked_cuis[0]
-                                break
-                    if top_cui:
-                        _, q_stys = cui_to_info.get(top_cui, ("", []))
-                        query_group = dominant_group(q_stys)
-                status_msg = (
-                    f"Mode: BioConceptVec (API resolver). Segments used: {len(segments)}. "
-                    f"Resolver queries tried: {resolver_queries_tried}, matched chunks: {resolver_hit_queries}, "
-                    f"fallback segments: {fallback_segments}. "
-                    f"Validated resolver hits: {len(resolved_rows)}; {len(seed_ids)} seed IDs after expansion."
-                )
-            except Exception as e:
-                return {}, [], f"Resolver API error: {e}"
+            segment_hits = 0
+            for seg in segments:
+                seg_seed_cuis = _seed_cuis_from_sapbert_segment(seg)
+                if not seg_seed_cuis:
+                    continue
+                segment_hits += 1
+                for row_cui in seg_seed_cuis:
+                    seed_cuis.append(row_cui)
+                    for sab, code in sorted(cui_to_sources.get(row_cui, set())):
+                        seed_ids.extend(concept_ids_from_source(sab, code))
+                        seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
+            if seed_cuis:
+                _, q_stys = cui_to_info.get(seed_cuis[0], ("", []))
+                query_group = dominant_group(q_stys)
+            resolver_label = "SapBERT resolver"
+            if args.resolver == "umls_api":
+                resolver_label += " (umls_api alias)"
+            status_msg = (
+                f"Mode: BioConceptVec ({resolver_label}). Segments used: {len(segments)}. "
+                f"Segments with hits: {segment_hits}. "
+                f"Seed CUIs: {len(seed_cuis)}; {len(seed_ids)} seed IDs after expansion."
+            )
 
         seed_rows = [bcv_to_row[x] for x in sorted(set(seed_ids)) if x in bcv_to_row]
         if not seed_rows:
@@ -908,32 +1009,24 @@ def create_app(args):
                     seed_cuis.append(q_cui)
             status_msg = f"Mode: cui2vec (exact resolver). Segments used: {len(segments)}."
         else:
-            try:
-                resolved_rows = []
-                resolver_queries_tried = 0
-                resolver_hit_queries = 0
-                fallback_segments = 0
-                for seg in segments:
-                    matched_rows, tried_query_count, hit_queries = resolve_cuis_with_umls_api(seg, args)
-                    resolved_rows.extend(matched_rows)
-                    resolver_queries_tried += tried_query_count
-                    resolver_hit_queries += len(hit_queries)
-                    if tried_query_count > 1:
-                        fallback_segments += 1
-                for row in resolved_rows:
-                    cui = _extract_cui_from_row(row)
-                    if cui:
-                        seed_cuis.append(cui)
-                    for sab, code in _extract_source_codes_from_row(row, args):
+            segment_hits = 0
+            for seg in segments:
+                seg_seed_cuis = _seed_cuis_from_sapbert_segment(seg)
+                if not seg_seed_cuis:
+                    continue
+                segment_hits += 1
+                for cui in seg_seed_cuis:
+                    seed_cuis.append(cui)
+                    for sab, code in sorted(cui_to_sources.get(cui, set())):
                         seed_cuis.extend(list(source_to_cuis.get((sab, code), [])))
-                status_msg = (
-                    f"Mode: cui2vec (API resolver). Segments used: {len(segments)}. "
-                    f"Resolver queries tried: {resolver_queries_tried}, matched chunks: {resolver_hit_queries}, "
-                    f"fallback segments: {fallback_segments}. "
-                    f"Validated resolver hits: {len(resolved_rows)}; {len(seed_cuis)} seed CUIs."
-                )
-            except Exception as e:
-                return {}, [], f"Resolver API error: {e}"
+            resolver_label = "SapBERT resolver"
+            if args.resolver == "umls_api":
+                resolver_label += " (umls_api alias)"
+            status_msg = (
+                f"Mode: cui2vec ({resolver_label}). Segments used: {len(segments)}. "
+                f"Segments with hits: {segment_hits}. "
+                f"Seed CUIs: {len(seed_cuis)}."
+            )
 
         seed_rows = [cui2_to_row[c] for c in sorted(set(seed_cuis)) if c in cui2_to_row]
         if not seed_rows:
@@ -1157,21 +1250,23 @@ def create_app(args):
             max_score = float(max_score_in) if max_score_in else None
         except ValueError:
             max_score = None
+        contrib = {}
+        mode_seed_cuis = []
 
         if selected_mode == "sapbert":
-            dist, _, status_msg = run_sapbert(query, top_k)
+            dist, mode_seed_cuis, status_msg = run_sapbert(query, top_k)
             rel = normalize_distance_map(dist)
             ranking = sorted(rel.items(), key=lambda x: x[1], reverse=True)
             status_msg += " Scores shown as normalized relevance."
 
         elif selected_mode == "bioconceptvec":
-            dist, _, status_msg = run_bioconceptvec(query, top_k)
+            dist, mode_seed_cuis, status_msg = run_bioconceptvec(query, top_k)
             rel = normalize_distance_map(dist)
             ranking = sorted(rel.items(), key=lambda x: x[1], reverse=True)
             status_msg += " Scores shown as normalized relevance."
 
         elif selected_mode == "cui2vec":
-            dist, _, status_msg = run_cui2vec(query, top_k)
+            dist, mode_seed_cuis, status_msg = run_cui2vec(query, top_k)
             rel = normalize_distance_map(dist)
             ranking = sorted(rel.items(), key=lambda x: x[1], reverse=True)
             status_msg += " Scores shown as normalized relevance."
@@ -1205,12 +1300,29 @@ def create_app(args):
                 fused[cui] = score
                 contrib[cui] = (c1, c2, c3, boost)
             ranking = sorted(fused.items(), key=lambda x: x[1], reverse=True)
+            mode_seed_cuis = sorted(seed_cuis)
             status_msg = (
                 "Mode: Ensemble. "
                 f"Candidates sapbert={len(d1)}, bioconceptvec={len(d2)}, cui2vec={len(d3)}. "
                 f"Weights=({w1},{w2},{w3}), "
                 f"MRREL base boost={args.mrrel_boost}, MRREL combo boost={args.mrrel_count_boost}."
             )
+
+        query_profile = infer_query_semantic_profile(query, mode_seed_cuis, term_to_cui, cui_to_info, sty_to_group)
+        reranked = []
+        for cui, base_score in ranking:
+            _, sty_list = cui_to_info.get(cui, (cui, []))
+            groups = {sty_to_group.get(sty, "Unknown") for sty in sty_list} if sty_list else {"Unknown"}
+            if selected_mode == "ensemble":
+                c1, c2, c3, _ = contrib.get(cui, (0.0, 0.0, 0.0, 0.0))
+                support_count = int(c1 > 0) + int(c2 > 0) + int(c3 > 0)
+            else:
+                support_count = 1
+            mult = semantic_compatibility_multiplier(groups, query_profile, support_count)
+            reranked.append((cui, float(base_score) * mult))
+        ranking = sorted(reranked, key=lambda x: x[1], reverse=True)
+        dominant_group = query_profile.get("dominant_group") or "unknown"
+        status_msg += f" Semantic rerank dominant group: {dominant_group}."
 
         results = []
         sty_set = set()

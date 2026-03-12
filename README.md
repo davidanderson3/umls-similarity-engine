@@ -20,7 +20,8 @@ Additional runtime capabilities:
 - Long-query segmentation for `bioconceptvec`/`cui2vec` (`--chunk_long_query_min_chars`, `--chunk_max_segments`)
 - Resolver strategies for seed concept resolution:
   - `--resolver exact` (direct string-to-term match)
-  - `--resolver umls_api` (external/local resolver API)
+  - `--resolver sapbert` (SapBERT nearest-concept seeding)
+  - `--resolver umls_api` (legacy alias of `sapbert`)
 - Optional MRREL graph boost in ensemble mode (`--mrrel*` flags)
 - Optional cross-type filtering in BioConceptVec mode (`--cross_type_only`)
 
@@ -140,29 +141,16 @@ python umls_similarity_web.py \
 
 Open `http://127.0.0.1:5000`.
 
-## Resolver API Integration (optional)
+## SapBERT Seed Resolver
 
-Use `--resolver umls_api` to resolve long or free-text queries through an external/local resolver.
-
-This project is configured to work with:
-- https://github.com/davidanderson3/umls-search
-
-When that service is running locally, you can point this app at its search endpoint (example below).
+For `bioconceptvec` and `cui2vec`, use `--resolver sapbert` to generate seed CUIs from SapBERT nearest-neighbor matches per query segment.
 
 Example:
 
 ```bash
 python umls_similarity_web.py \
   --mode ensemble \
-  --resolver umls_api \
-  --umls_api_base_url http://localhost:3000 \
-  --umls_api_search_path /api/search \
-  --umls_api_query_param q \
-  --umls_api_page_param page \
-  --umls_api_size_param size \
-  --umls_api_limit_param size \
-  --umls_api_limit 100 \
-  --umls_api_results_key results \
+  --resolver sapbert \
   --metadata final/umls_metadata.csv \
   --index final/umls_index_hnsw.faiss \
   --bioconceptvec_index final/bioconceptvec_cbow.faiss \
@@ -193,7 +181,7 @@ python umls_similarity_web.py \
 
 - Added multi-mode web search (`sapbert`, `bioconceptvec`, `cui2vec`, `ensemble`)
 - Added long-query segmentation controls for concept-vector modes
-- Added resolver abstraction (`exact` and `umls_api`)
+- Added resolver abstraction (`exact`, `sapbert`, and legacy `umls_api` alias)
 - Added ensemble score breakdown columns in the UI
 - Added optional MRREL relation boosting for ensemble ranking
 - Added scripts to build BioConceptVec and cui2vec FAISS indexes
