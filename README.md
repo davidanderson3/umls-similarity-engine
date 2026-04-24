@@ -19,8 +19,8 @@ This repository supports:
 Additional runtime capabilities:
 - Long-query segmentation for `bioconceptvec`/`cui2vec` (`--chunk_long_query_min_chars`, `--chunk_max_segments`)
 - Resolver strategies for seed concept resolution:
+  - `--resolver sapbert` (default; SapBERT nearest-concept seeding for free-text queries)
   - `--resolver exact` (direct string-to-term match)
-  - `--resolver sapbert` (SapBERT nearest-concept seeding)
   - `--resolver umls_api` (legacy alias of `sapbert`)
 - Optional MRREL graph boost in ensemble mode (`--mrrel*` flags)
 - Optional cross-type filtering in BioConceptVec mode (`--cross_type_only`)
@@ -135,6 +135,7 @@ python umls_similarity_web.py \
   --bioconceptvec_ids final/bioconceptvec_ids.txt \
   --cui2vec_index final/cui2vec.faiss \
   --cui2vec_cuis final/cui2vec_cuis.txt \
+  --mrconso /path/to/MRCONSO.RRF \
   --host 0.0.0.0 \
   --port 5000
 ```
@@ -143,14 +144,13 @@ Open `http://127.0.0.1:5000`.
 
 ## SapBERT Seed Resolver
 
-For `bioconceptvec` and `cui2vec`, use `--resolver sapbert` to generate seed CUIs from SapBERT nearest-neighbor matches per query segment.
+`bioconceptvec` requires `--mrconso` so the app can map UMLS CUIs to the MESH/OMIM source IDs stored in the BioConceptVec index. `cui2vec` works without `--mrconso` for exact-CUI matches, but free-text queries are much better with the default `--resolver sapbert`.
 
 Example:
 
 ```bash
 python umls_similarity_web.py \
   --mode ensemble \
-  --resolver sapbert \
   --metadata final/umls_metadata.csv \
   --index final/umls_index_hnsw.faiss \
   --bioconceptvec_index final/bioconceptvec_cbow.faiss \
@@ -182,6 +182,9 @@ python umls_similarity_web.py \
 - Added multi-mode web search (`sapbert`, `bioconceptvec`, `cui2vec`, `ensemble`)
 - Added long-query segmentation controls for concept-vector modes
 - Added resolver abstraction (`exact`, `sapbert`, and legacy `umls_api` alias)
+- Defaulted the resolver to `sapbert` and made ensemble weights renormalize over active sources
+- Added lexical anchoring so free-text phrases keep matching terms ahead of generic concept-vector neighbors
+- Added adaptive SapBERT anchoring and intent-aware reranking for treatment-form queries such as medicines, antibiotics, and inhalers
 - Added ensemble score breakdown columns in the UI
 - Added optional MRREL relation boosting for ensemble ranking
 - Added scripts to build BioConceptVec and cui2vec FAISS indexes

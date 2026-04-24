@@ -44,6 +44,28 @@ RESOLVER_GENERIC_TOKENS = {
     "therapeutic", "therapy", "therapies", "transition", "treatment", "treatments", "tumor", "tumors",
     "tumour", "tumours", "understanding", "variability",
 }
+TOKEN_NORMALIZATION_ALIASES = {
+    "antibiotics": "antibiotic",
+    "drug": "medication",
+    "drugs": "medication",
+    "medication": "medication",
+    "medications": "medication",
+    "medicine": "medication",
+    "medicines": "medication",
+}
+LOW_VALUE_MODIFIER_TOKENS = {
+    "analysis", "assessment", "attack", "bilateral", "check", "clinical", "complicated", "contralateral",
+    "determination", "evaluation", "exam", "examination", "formation", "history", "management",
+    "measure", "measurement", "medical", "method", "monitor", "monitoring", "panel", "prior", "probability",
+    "reading", "recurrent", "reported", "secondary", "severe", "sign", "signs", "specimen",
+    "symptom", "symptoms", "tak", "taking", "therapeutic", "therapy", "unspecified",
+}
+LOW_VALUE_QUERY_TOKENS = {
+    "analysis", "assessment", "check", "diagnosis", "diagnostic", "exam", "examination",
+    "history", "management", "measure", "measurement", "method", "monitor", "monitoring",
+    "procedure", "reading", "screen", "screening", "sign", "signs", "symptom", "symptoms",
+    "test", "testing",
+}
 RESOLVER_EDGE_TOKENS = RESOLVER_STOPWORDS | {
     "ability", "arises", "arise", "based", "core", "course", "create", "creates", "creating",
     "critical", "dedicated", "despite", "diverse", "drive", "driven", "drives", "effective",
@@ -57,6 +79,13 @@ TREATMENT_INTENT_TOKENS = {
     "treat", "treatment", "therapy", "therapeutic", "manage", "management",
     "medication", "medicine", "drug", "drugs", "agent", "agents",
 }
+MEDICATION_INTENT_TOKENS = {
+    "medication", "medicine", "drug", "drugs", "antibiotic", "antibiotics",
+    "pill", "pills", "tablet", "tablets", "statin", "statins",
+}
+DEVICE_INTENT_TOKENS = {
+    "inhaler", "inhalers", "device", "devices", "pump", "pumps", "injector", "injectors",
+}
 DIAGNOSTIC_INTENT_TOKENS = {
     "diagnosis", "diagnostic", "screen", "screening", "test", "testing", "detect",
 }
@@ -68,6 +97,14 @@ LOW_SIGNAL_GROUP_MULTIPLIER = {
     "Occupations": 0.45,
     "Organizations": 0.45,
 }
+
+QUERY_REWRITE_RULES = (
+    (re.compile(r"\bmeds\b", re.I), "medication", 0.02),
+    (re.compile(r"\bmed\b", re.I), "medication", 0.02),
+    (re.compile(r"\bpills?\b", re.I), "medication", 0.03),
+    (re.compile(r"\buti\b", re.I), "urinary tract infection", 0.02),
+    (re.compile(r"\bcopd\b", re.I), "chronic obstructive pulmonary disease", 0.02),
+)
 
 
 def parse_args():
@@ -104,8 +141,8 @@ def parse_args():
     p.add_argument("--mrrel_rela", default="",
                    help="Comma-separated RELA filter for MRREL boost (optional)")
 
-    p.add_argument("--resolver", choices=["exact", "sapbert", "umls_api"], default="exact",
-                   help="Resolver used for bioconceptvec/cui2vec/ensemble modes (umls_api kept as alias)")
+    p.add_argument("--resolver", choices=["exact", "sapbert", "umls_api"], default="sapbert",
+                   help="Resolver used for bioconceptvec/cui2vec/ensemble modes (sapbert works best for free-text queries; umls_api kept as alias)")
     p.add_argument("--umls_api_base_url", default="", help="Base URL for local UMLS resolver API")
     p.add_argument("--umls_api_search_path", default="/search", help="Resolver API path")
     p.add_argument("--umls_api_query_param", default="q", help="Resolver API query parameter for input text")
@@ -217,14 +254,68 @@ def split_query_segments(query: str, min_chars: int, max_segments: int):
     return parts[:max(1, max_segments)]
 
 
+def rewrite_query_variants(query: str):
+    q = _space_re.sub(" ", (query or "").strip())
+    if not q:
+        return []
+
+    variants = [(q, 0.0)]
+    seen = {norm_term(q)}
+
+    def add_variant(text: str, penalty: float):
+        cleaned = _space_re.sub(" ", (text or "").strip())
+        if not cleaned:
+            return
+        key = norm_term(cleaned)
+        if key in seen:
+            return
+        seen.add(key)
+        variants.append((cleaned, penalty))
+
+    for pattern, replacement, penalty in QUERY_REWRITE_RULES:
+        if pattern.search(q):
+            add_variant(pattern.sub(replacement, q), penalty)
+
+    lowered = q.lower()
+    if "blood pressure" in lowered and any(token in lowered for token in ("med", "meds", "medicine", "medication", "drug", "drugs", "pill", "pills")):
+        add_variant(re.sub(r"(?i)blood pressure", "hypertension", q), 0.05)
+        add_variant(re.sub(r"(?i)blood pressure", "high blood pressure", q), 0.04)
+    if ("cholesterol" in lowered) and any(token in lowered for token in ("med", "meds", "medicine", "medication", "drug", "drugs", "pill", "pills")):
+        add_variant(re.sub(r"(?i)cholesterol", "statin", q), 0.07)
+        add_variant(re.sub(r"(?i)cholesterol", "cholesterol lowering", q), 0.05)
+    if ("blood sugar" in lowered or "glucose" in lowered) and any(token in lowered for token in ("med", "meds", "medicine", "medication", "drug", "drugs", "pill", "pills")):
+        add_variant(re.sub(r"(?i)blood sugar", "diabetes", q), 0.06)
+        add_variant(re.sub(r"(?i)blood sugar", "blood glucose", q), 0.03)
+    if "bladder infection" in lowered:
+        add_variant(re.sub(r"(?i)bladder infection", "urinary tract infection", q), 0.04)
+        add_variant(re.sub(r"(?i)bladder infection", "cystitis", q), 0.05)
+    if "acid reflux" in lowered:
+        add_variant(re.sub(r"(?i)acid reflux", "gastroesophageal reflux", q), 0.04)
+        add_variant(re.sub(r"(?i)acid reflux", "heartburn", q), 0.05)
+    if "kidney stone" in lowered:
+        add_variant(re.sub(r"(?i)kidney stone", "nephrolithiasis", q), 0.05)
+    if "heart failure" in lowered and any(token in lowered for token in ("med", "meds", "medicine", "medication", "drug", "drugs", "pill", "pills")):
+        add_variant(re.sub(r"(?i)heart failure", "heart failure treatment", q), 0.05)
+    if "asthma inhaler" in lowered:
+        add_variant(re.sub(r"(?i)asthma inhaler", "bronchodilator inhaler", q), 0.04)
+    return variants
+
+
 def tokenize_text(text: str):
     return _token_re.findall((text or "").lower())
 
 
 def normalize_token(token: str):
     t = (token or "").lower()
+    alias = TOKEN_NORMALIZATION_ALIASES.get(t)
+    if alias:
+        return alias
     if len(t) > 4 and t.endswith("ies"):
         t = t[:-3] + "y"
+    elif len(t) > 6 and t.endswith("ers") and t[-4] == t[-5]:
+        t = t[:-3]
+    elif len(t) > 5 and t.endswith("er") and t[-3] == t[-4]:
+        t = t[:-2]
     elif len(t) > 5 and t.endswith("ing"):
         t = t[:-3]
     elif len(t) > 4 and t.endswith("ed"):
@@ -239,7 +330,11 @@ def normalize_token(token: str):
         t = t[:-4]
     elif len(t) > 4 and t.endswith("s"):
         t = t[:-1]
-    return t
+    return TOKEN_NORMALIZATION_ALIASES.get(t, t)
+
+
+NORMALIZED_LOW_VALUE_MODIFIER_TOKENS = {normalize_token(token) for token in LOW_VALUE_MODIFIER_TOKENS}
+NORMALIZED_LOW_VALUE_QUERY_TOKENS = {normalize_token(token) for token in LOW_VALUE_QUERY_TOKENS}
 
 
 def is_generic_resolver_token(token: str):
@@ -264,6 +359,216 @@ def analyze_resolver_text(text: str):
         "distinctive_sigs": distinctive_sigs,
         "generic_count": generic_count,
     }
+
+
+def text_content_signatures(text: str):
+    sigs = set()
+    for token in tokenize_text(text):
+        if token in RESOLVER_STOPWORDS:
+            continue
+        sig = normalize_token(token)
+        if sig:
+            sigs.add(sig)
+    return sigs
+
+
+def _query_text_options(query_text):
+    if isinstance(query_text, (list, tuple)):
+        return [str(x) for x in query_text if str(x).strip()]
+    text = str(query_text or "").strip()
+    return [text] if text else []
+
+
+def lexical_overlap_features(query_text: str, candidate_text: str):
+    candidate_sigs = text_content_signatures(candidate_text)
+    candidate_total = max(1, len(candidate_sigs))
+    best = None
+    for query_option in _query_text_options(query_text):
+        query_info = analyze_resolver_text(query_option)
+        shared_content = query_info["content_sigs"] & candidate_sigs
+        shared_distinctive = query_info["distinctive_sigs"] & candidate_sigs
+        extra_candidate = candidate_sigs - query_info["content_sigs"]
+        extra_low_value = {sig for sig in extra_candidate if sig in NORMALIZED_LOW_VALUE_MODIFIER_TOKENS}
+        query_low_value = query_info["content_sigs"] & NORMALIZED_LOW_VALUE_QUERY_TOKENS
+        norm_query = norm_term(query_option)
+        norm_candidate = norm_term(candidate_text)
+        exact_match = bool(norm_query and norm_candidate and norm_query == norm_candidate)
+        substring_match = bool(
+            norm_query
+            and norm_candidate
+            and not exact_match
+            and (norm_query in norm_candidate or norm_candidate in norm_query)
+        )
+        query_total = max(1, len(query_info["content_sigs"]))
+        current = {
+            "exact_match": exact_match,
+            "substring_match": substring_match,
+            "shared_content": len(shared_content),
+            "shared_distinctive": len(shared_distinctive),
+            "query_coverage": len(shared_content) / query_total,
+            "candidate_coverage": len(shared_content) / candidate_total,
+            "query_content_total": len(query_info["content_sigs"]),
+            "extra_candidate": len(extra_candidate),
+            "extra_low_value": len(extra_low_value),
+            "query_has_low_value_focus": bool(query_low_value),
+        }
+        rank = (
+            int(current["exact_match"]),
+            int(current["substring_match"]),
+            current["shared_distinctive"],
+            current["shared_content"],
+            current["query_coverage"],
+            -current["extra_low_value"],
+            current["candidate_coverage"],
+        )
+        if best is None or rank > best[0]:
+            best = (rank, current)
+    if best is None:
+        return {
+            "exact_match": False,
+            "substring_match": False,
+            "shared_content": 0,
+            "shared_distinctive": 0,
+            "query_coverage": 0.0,
+            "candidate_coverage": 0.0,
+            "query_content_total": 0,
+            "extra_candidate": 0,
+            "extra_low_value": 0,
+            "query_has_low_value_focus": False,
+        }
+    return best[1]
+
+
+def lexical_relevance_multiplier(query_text: str, candidate_text: str):
+    feats = lexical_overlap_features(query_text, candidate_text)
+    if feats["query_content_total"] == 0:
+        return 1.0
+    if feats["exact_match"]:
+        return 1.30
+
+    score = 0.78 + (0.22 * feats["query_coverage"]) + (0.05 * feats["candidate_coverage"])
+    if feats["shared_distinctive"] > 0:
+        score += 0.10
+    elif feats["shared_content"] > 0:
+        score += 0.05
+    elif feats["query_content_total"] >= 2:
+        score -= 0.12
+    if feats["substring_match"]:
+        score += 0.08
+    if feats["query_content_total"] <= 3 and feats["extra_candidate"] > 0:
+        score -= min(0.10, 0.03 * feats["extra_candidate"])
+    if feats["extra_low_value"] > 0 and not feats["query_has_low_value_focus"]:
+        score -= min(0.24, 0.12 * feats["extra_low_value"])
+    return max(0.55, min(1.20, score))
+
+
+def ensemble_source_multiplier(query_text: str, candidate_text: str, c1: float, c2: float, c3: float):
+    feats = lexical_overlap_features(query_text, candidate_text)
+    total = float(c1) + float(c2) + float(c3)
+    if total <= 0.0:
+        return 1.0
+
+    sap_share = float(c1) / total
+    query_total = feats["query_content_total"]
+    coverage = feats["query_coverage"]
+
+    if query_total <= 1:
+        return 1.0
+
+    if feats["exact_match"]:
+        return 1.12 if sap_share > 0.0 else 1.04
+
+    mult = 1.0
+    if coverage < 0.75:
+        if sap_share < 0.20:
+            mult *= 0.58
+        elif sap_share < 0.35:
+            mult *= 0.74
+        elif sap_share < 0.50:
+            mult *= 0.88
+
+    if coverage <= 0.50 and not feats["substring_match"]:
+        mult *= 0.90
+
+    if feats["shared_distinctive"] == 0 and sap_share < 0.35:
+        mult *= 0.88
+
+    return max(0.45, min(1.12, mult))
+
+
+def sapbert_anchor_strength(query_text: str, normalized_scores, cui_to_info):
+    if not normalized_scores:
+        return 0.0
+    best_cui, best_score = sorted(normalized_scores.items(), key=lambda x: x[1], reverse=True)[0]
+    term, _ = cui_to_info.get(best_cui, (best_cui, []))
+    feats = lexical_overlap_features(query_text, term)
+    if feats["query_content_total"] <= 1:
+        return 0.0
+    if feats["exact_match"]:
+        return 0.55
+    if feats["substring_match"]:
+        return 0.55 if feats["query_coverage"] >= 1.0 else 0.45
+    if feats["shared_distinctive"] > 0 and feats["query_coverage"] >= 0.5 and best_score >= 0.9:
+        return 0.40
+    if feats["shared_content"] > 0 and best_score >= 0.9:
+        return 0.25
+    return 0.0
+
+
+def sapbert_seed_semantic_priority(sty_list):
+    lower = [(sty or "").lower() for sty in (sty_list or [])]
+    if any("hazardous or poisonous substance" in sty for sty in lower):
+        return 0
+    if any(is_drug_sty(sty) for sty in lower):
+        return 4
+    if any(is_disease_sty(sty) for sty in lower):
+        return 3
+    if any("therapeutic or preventive procedure" in sty or "diagnostic procedure" in sty for sty in lower):
+        return 3
+    if any("finding" in sty or "sign or symptom" in sty or "pathologic function" in sty for sty in lower):
+        return 2
+    return 1
+
+
+def sapbert_seed_rank(query_text: str, candidate_text: str, sty_list, distance: float):
+    feats = lexical_overlap_features(query_text, candidate_text)
+    has_overlap = int(
+        feats["exact_match"]
+        or feats["substring_match"]
+        or feats["shared_distinctive"] > 0
+        or feats["shared_content"] > 0
+    )
+    return (
+        has_overlap,
+        sapbert_seed_semantic_priority(sty_list),
+        int(feats["exact_match"]),
+        int(feats["substring_match"]),
+        feats["shared_distinctive"],
+        feats["shared_content"],
+        feats["query_coverage"],
+        feats["candidate_coverage"],
+        -float(distance),
+    )
+
+
+def select_sapbert_seed_cuis_for_text(query_text: str, raw_scores, cui_to_info, limit: int):
+    ranked = []
+    seen = set()
+    for cui, distance in sorted(raw_scores.items(), key=lambda x: x[1]):
+        if cui in seen:
+            continue
+        seen.add(cui)
+        term, sty_list = cui_to_info.get(cui, (cui, []))
+        if any(sty in RESOLVER_EXCLUDED_SEMANTIC_TYPES for sty in sty_list):
+            continue
+        rank = sapbert_seed_rank(query_text, term, sty_list, float(distance))
+        ranked.append((rank, cui))
+    if not ranked:
+        return []
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    overlap_ranked = [item for item in ranked if item[0][0] > 0]
+    chosen = overlap_ranked if overlap_ranked else ranked
+    return [cui for _, cui in chosen[:max(1, limit)]]
 
 
 def clean_resolver_chunk(text: str):
@@ -371,6 +676,22 @@ def is_drug_sty(sty: str) -> bool:
         or ("enzyme inhibitor" in s)
         or ("organic chemical" in s)
     )
+
+
+def is_therapeutic_agent_sty(sty: str) -> bool:
+    s = (sty or "").lower()
+    return (
+        ("pharmacologic substance" in s)
+        or ("clinical drug" in s)
+        or ("antibiotic" in s)
+        or ("hormone" in s)
+        or ("enzyme inhibitor" in s)
+    )
+
+
+def is_device_sty(sty: str) -> bool:
+    s = (sty or "").lower()
+    return ("medical device" in s) or ("drug delivery device" in s)
 
 
 def dominant_group(sty_list):
@@ -739,9 +1060,53 @@ def normalize_distance_map(dist_map):
     return {k: (hi - v) / (hi - lo) for k, v in dist_map.items()}
 
 
+def normalize_weight_map(weight_map):
+    positive = {k: float(v) for k, v in weight_map.items() if float(v) > 0.0}
+    total = sum(positive.values())
+    if total <= 0.0:
+        return {k: 0.0 for k in weight_map}
+    return {k: positive.get(k, 0.0) / total for k in weight_map}
+
+
+def summarize_status_detail(status_msg: str):
+    text = (status_msg or "").strip()
+    if not text:
+        return ""
+    parts = [part.strip() for part in re.split(r"(?<=[.])\s+", text) if part.strip()]
+    for part in parts:
+        lowered = part.lower()
+        if (
+            "requires --mrconso" in lowered
+            or "not loaded" in lowered
+            or "no exact term match found" in lowered
+            or "matched seed ids in index: 0" in lowered
+            or "matched seed cuis in index: 0" in lowered
+        ):
+            return part
+    return ""
+
+
+def search_sapbert_with_variants(query, search_k, tokenizer, model, device, sap_index, cuis):
+    merged = {}
+    variants = rewrite_query_variants(query) or [(query, 0.0)]
+    for variant_text, variant_penalty in variants:
+        q_vec = encode_query(variant_text, tokenizer, model, device)
+        D, I = sap_index.search(q_vec, search_k)
+        for idx, score in zip(I[0], D[0]):
+            if idx < 0:
+                continue
+            cui = cuis[idx]
+            adjusted = float(score) + float(variant_penalty)
+            if cui not in merged or adjusted < merged[cui]:
+                merged[cui] = adjusted
+    return merged, variants
+
+
 def infer_query_semantic_profile(query, seed_cuis, term_to_cui, cui_to_info, sty_to_group):
     tokens = set(tokenize_text(query))
     treatment_intent = bool(tokens & TREATMENT_INTENT_TOKENS)
+    medication_intent = bool(tokens & MEDICATION_INTENT_TOKENS)
+    device_intent = bool(tokens & DEVICE_INTENT_TOKENS)
     diagnostic_intent = bool(tokens & DIAGNOSTIC_INTENT_TOKENS)
 
     group_counts = defaultdict(int)
@@ -765,11 +1130,146 @@ def infer_query_semantic_profile(query, seed_cuis, term_to_cui, cui_to_info, sty
     if group_counts:
         dominant_group = sorted(group_counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
 
+    if medication_intent and not device_intent and dominant_group in (
+        None,
+        "Activities & Behaviors",
+        "Concepts & Ideas",
+        "Physiology",
+        "Procedures",
+    ):
+        dominant_group = "Chemicals & Drugs"
+    elif diagnostic_intent and dominant_group in (None, "Chemicals & Drugs", "Physiology"):
+        dominant_group = "Procedures"
+    elif device_intent and not medication_intent and dominant_group is None:
+        dominant_group = "Objects"
+
     return {
         "dominant_group": dominant_group,
         "treatment_intent": treatment_intent,
+        "medication_intent": medication_intent,
+        "device_intent": device_intent,
         "diagnostic_intent": diagnostic_intent,
     }
+
+
+def intent_match_multiplier(sty_list, query_profile):
+    styles = sty_list or []
+    medication_intent = query_profile.get("medication_intent", False)
+    device_intent = query_profile.get("device_intent", False)
+    diagnostic_intent = query_profile.get("diagnostic_intent", False)
+
+    if not (medication_intent or device_intent or diagnostic_intent):
+        return 1.0
+
+    has_therapeutic_agent = any(is_therapeutic_agent_sty(sty) for sty in styles)
+    has_device = any(is_device_sty(sty) for sty in styles)
+    has_disease = any(is_disease_sty(sty) for sty in styles)
+    has_diagnostic = any(
+        ("diagnostic procedure" in (sty or "").lower())
+        or ("laboratory procedure" in (sty or "").lower())
+        for sty in styles
+    )
+    has_procedure = has_diagnostic or any(
+        ("therapeutic or preventive procedure" in (sty or "").lower())
+        or ("health care activity" in (sty or "").lower())
+        for sty in styles
+    )
+    has_finding = any(
+        ("finding" in (sty or "").lower())
+        or ("sign or symptom" in (sty or "").lower())
+        or ("organism function" in (sty or "").lower())
+        or ("health care activity" in (sty or "").lower())
+        or ("clinical attribute" in (sty or "").lower())
+        for sty in styles
+    )
+
+    mult = 1.0
+    if medication_intent:
+        if has_therapeutic_agent:
+            mult *= 1.34
+        elif any(is_drug_sty(sty) for sty in styles):
+            mult *= 1.12
+        elif has_device and device_intent:
+            mult *= 1.10
+        elif has_diagnostic:
+            mult *= 0.66
+        elif has_procedure:
+            mult *= 0.76
+        elif has_disease:
+            mult *= 0.80
+        elif has_finding:
+            mult *= 0.62
+
+    if device_intent:
+        if has_device:
+            mult *= 1.22
+        elif has_therapeutic_agent and medication_intent:
+            mult *= 1.02
+        elif has_diagnostic:
+            mult *= 0.76
+        elif has_disease:
+            mult *= 0.84
+
+    if diagnostic_intent:
+        if has_diagnostic:
+            mult *= 1.18
+        elif has_therapeutic_agent:
+            mult *= 0.82
+
+    return max(0.45, min(1.35, mult))
+
+
+def concept_form_multiplier(query_text: str, candidate_text: str, sty_list, query_profile):
+    feats = lexical_overlap_features(query_text, candidate_text)
+    if feats["query_content_total"] == 0:
+        return 1.0
+
+    styles = [(sty or "").lower() for sty in (sty_list or [])]
+    short_query = feats["query_content_total"] <= 3
+    medication_intent = query_profile.get("medication_intent", False)
+    device_intent = query_profile.get("device_intent", False)
+    diagnostic_intent = query_profile.get("diagnostic_intent", False)
+
+    has_finding = any(
+        ("finding" in sty)
+        or ("sign or symptom" in sty)
+        or ("clinical attribute" in sty)
+        or ("organism function" in sty)
+        for sty in styles
+    )
+    has_symptom = any("sign or symptom" in sty for sty in styles)
+    has_measurement = any(
+        ("diagnostic procedure" in sty)
+        or ("laboratory procedure" in sty)
+        or ("health care activity" in sty)
+        for sty in styles
+    )
+    has_body_substance = any("body substance" in sty for sty in styles)
+    dominant_group = query_profile.get("dominant_group")
+
+    mult = 1.0
+    if short_query and feats["extra_candidate"] > 0:
+        mult *= max(0.82, 1.0 - (0.05 * feats["extra_candidate"]))
+    if feats["extra_low_value"] > 0 and not feats["query_has_low_value_focus"]:
+        mult *= max(0.60, 1.0 - (0.18 * feats["extra_low_value"]))
+        if short_query:
+            mult *= 0.88
+        if short_query and (has_finding or has_measurement or has_body_substance):
+            mult *= 0.84
+        if short_query and dominant_group == "Disorders":
+            mult *= 0.78
+        if medication_intent and has_finding:
+            mult *= 0.72
+    if short_query and not (medication_intent or device_intent or diagnostic_intent):
+        if has_measurement:
+            mult *= 0.78
+        elif has_body_substance:
+            mult *= 0.82
+        elif has_finding and feats["extra_low_value"] > 0:
+            mult *= 0.86
+        if dominant_group == "Disorders" and has_symptom:
+            mult *= 0.78
+    return max(0.45, min(1.05, mult))
 
 
 def semantic_compatibility_multiplier(candidate_groups, query_profile, support_count):
@@ -788,6 +1288,7 @@ def semantic_compatibility_multiplier(candidate_groups, query_profile, support_c
         return low_signal
 
     treatment_intent = query_profile.get("treatment_intent", False)
+    medication_intent = query_profile.get("medication_intent", False)
     diagnostic_intent = query_profile.get("diagnostic_intent", False)
 
     cross = 0.72
@@ -802,9 +1303,12 @@ def semantic_compatibility_multiplier(candidate_groups, query_profile, support_c
             cross = 0.68
     elif dominant == "Chemicals & Drugs":
         if "Disorders" in groups:
-            cross = 0.92 if (treatment_intent or diagnostic_intent) else 0.85
+            if medication_intent:
+                cross = 0.78
+            else:
+                cross = 0.92 if (treatment_intent or diagnostic_intent) else 0.85
         elif "Procedures" in groups:
-            cross = 0.80
+            cross = 0.72 if medication_intent else 0.80
         elif "Genes & Molecular Sequences" in groups or "Physiology" in groups:
             cross = 0.82
         else:
@@ -861,6 +1365,7 @@ def create_app(args):
     source_to_cuis, cui_to_sources = build_source_mappings(args.mrconso)
     rxnorm_any, rxnorm_allowed = build_rxnorm_flags(args.mrconso)
     mrrel_neighbors, mrrel_edge_combos = build_mrrel_neighbors(args.mrrel, args.mrrel_rela)
+    has_source_mappings = bool(source_to_cuis) and bool(cui_to_sources)
 
     bc_index = None
     bcv_ids = []
@@ -887,40 +1392,68 @@ def create_app(args):
         cui2_index = None
 
     def run_sapbert(query, top_k):
-        q_vec = encode_query(query, tokenizer, model, device)
-        D, I = sap_index.search(q_vec, max(top_k * 5, top_k))
-        dist = {}
-        for idx, score in zip(I[0], D[0]):
-            if idx < 0:
-                continue
-            cui = cuis[idx]
-            if cui not in dist or score < dist[cui]:
-                dist[cui] = float(score)
+        dist, variants = search_sapbert_with_variants(
+            query,
+            max(top_k * 8, 200),
+            tokenizer,
+            model,
+            device,
+            sap_index,
+            cuis,
+        )
         seed_cuis = []
         q_cui = term_to_cui.get(norm_term(query))
         if q_cui:
             seed_cuis = [q_cui]
-        return dist, seed_cuis, "Mode: SapBERT."
+        else:
+            seed_cuis = select_sapbert_seed_cuis_for_text(
+                query,
+                dist,
+                cui_to_info,
+                args.resolver_max_hits_per_segment,
+            )
+        status = "Mode: SapBERT."
+        if len(variants) > 1:
+            status += f" Query rewrites used: {len(variants)}."
+        return dist, seed_cuis, status
 
     def _seed_cuis_from_sapbert_segment(seg: str):
         if not seg:
             return []
         # Pull a wider SapBERT candidate pool, then keep only high-quality unique CUIs.
         search_k = max(50, max(1, args.resolver_max_hits_per_segment) * 20)
-        sap_dist, _, _ = run_sapbert(seg, search_k)
-        out = []
-        for cui, _ in sorted(sap_dist.items(), key=lambda x: x[1]):
-            _, sty_list = cui_to_info.get(cui, ("", []))
+        dist_map, _ = search_sapbert_with_variants(
+            seg,
+            search_k,
+            tokenizer,
+            model,
+            device,
+            sap_index,
+            cuis,
+        )
+        best_by_cui = {}
+        for cui, score in sorted(dist_map.items(), key=lambda x: x[1]):
+            term, sty_list = cui_to_info.get(cui, (cui, []))
             if any(sty in RESOLVER_EXCLUDED_SEMANTIC_TYPES for sty in sty_list):
                 continue
-            out.append(cui)
-            if len(out) >= max(1, args.resolver_max_hits_per_segment):
-                break
-        return out
+            rank = sapbert_seed_rank(seg, term, sty_list, float(score))
+            prev = best_by_cui.get(cui)
+            if prev is None or rank > prev[0]:
+                best_by_cui[cui] = (rank, float(score))
+
+        if not best_by_cui:
+            return []
+
+        ranked = sorted(best_by_cui.items(), key=lambda x: x[1][0], reverse=True)
+        overlap_ranked = [item for item in ranked if item[1][0][0] > 0]
+        chosen = overlap_ranked if overlap_ranked else ranked
+        return [cui for cui, _ in chosen[:max(1, args.resolver_max_hits_per_segment)]]
 
     def run_bioconceptvec(query, top_k):
         if bc_index is None:
             return {}, [], "BioConceptVec index not loaded."
+        if not has_source_mappings:
+            return {}, [], "BioConceptVec requires --mrconso for MSH/OMIM <-> CUI mapping."
         seed_ids = []
         seed_cuis = []
         segments = split_query_segments(query, args.chunk_long_query_min_chars, args.chunk_max_segments)
@@ -963,7 +1496,10 @@ def create_app(args):
 
         seed_rows = [bcv_to_row[x] for x in sorted(set(seed_ids)) if x in bcv_to_row]
         if not seed_rows:
-            return {}, seed_cuis, status_msg + f" Matched seed IDs in index: {len(seed_rows)}."
+            extra = f" Matched seed IDs in index: {len(seed_rows)}."
+            if args.resolver == "exact" and not seed_cuis:
+                extra += " No exact term match found; try --resolver sapbert for free-text queries."
+            return {}, seed_cuis, status_msg + extra
 
         vecs = [bc_index.reconstruct(i) for i in seed_rows]
         q_vec = np.mean(np.vstack(vecs), axis=0, keepdims=True).astype("float32")
@@ -1030,7 +1566,10 @@ def create_app(args):
 
         seed_rows = [cui2_to_row[c] for c in sorted(set(seed_cuis)) if c in cui2_to_row]
         if not seed_rows:
-            return {}, seed_cuis, status_msg + f" Matched seed CUIs in index: {len(seed_rows)}."
+            extra = f" Matched seed CUIs in index: {len(seed_rows)}."
+            if args.resolver == "exact" and not seed_cuis:
+                extra += " No exact term match found; try --resolver sapbert for free-text queries."
+            return {}, seed_cuis, status_msg + extra
 
         vecs = [cui2_index.reconstruct(i) for i in seed_rows]
         q_vec = np.mean(np.vstack(vecs), axis=0, keepdims=True).astype("float32")
@@ -1162,9 +1701,9 @@ def create_app(args):
       <div class="mode-help">
         <p><strong>Embedding Sources</strong></p>
         <p><strong>SapBERT:</strong> best when you want terms with similar wording or synonyms.</p>
-        <p><strong>BioConceptVec:</strong> best when you want concepts that co-occur in biomedical literature.</p>
+        <p><strong>BioConceptVec:</strong> best when you want concepts that co-occur in biomedical literature. Requires <code>--mrconso</code> source mappings.</p>
         <p><strong>cui2vec:</strong> best when you want concepts that co-occur in clinical and literature data.</p>
-        <p><strong>Ensemble:</strong> combines all three and can apply an MRREL relation boost.</p>
+        <p><strong>Ensemble:</strong> combines all three, renormalizes over active sources, and can apply an MRREL relation boost.</p>
       </div>
       <label style="margin-top: 12px;">Score Threshold (optional):
         <input type="number" name="max_score" step="any" placeholder="minimum relevance, e.g. 0.4" value="{{default_max_score}}">
@@ -1237,6 +1776,7 @@ def create_app(args):
     @app.route("/search", methods=["POST"])
     def search():
         query = request.form.get("query", "").strip()
+        query_variants = [text for text, _ in rewrite_query_variants(query)] or [query]
         selected_mode = request.form.get("mode", args.mode).strip().lower()
         if selected_mode not in ("sapbert", "bioconceptvec", "cui2vec", "ensemble"):
             selected_mode = args.mode
@@ -1278,19 +1818,29 @@ def create_app(args):
             n1 = normalize_distance_map(d1)
             n2 = normalize_distance_map(d2)
             n3 = normalize_distance_map(d3)
-            w1 = args.ensemble_sapbert_weight
-            w2 = args.ensemble_bioconceptvec_weight
-            w3 = args.ensemble_cui2vec_weight
+            anchor_strength = sapbert_anchor_strength(query_variants, n1, cui_to_info)
+            configured_weights = {
+                "sapbert": args.ensemble_sapbert_weight,
+                "bioconceptvec": args.ensemble_bioconceptvec_weight,
+                "cui2vec": args.ensemble_cui2vec_weight,
+            }
+            active_weights = normalize_weight_map({
+                "sapbert": configured_weights["sapbert"] if d1 else 0.0,
+                "bioconceptvec": configured_weights["bioconceptvec"] if d2 else 0.0,
+                "cui2vec": configured_weights["cui2vec"] if d3 else 0.0,
+            })
             fused = {}
             contrib = {}
             all_cuis = set(n1) | set(n2) | set(n3)
             seed_cuis = set(s1) | set(s2) | set(s3)
             for cui in all_cuis:
-                c1 = w1 * n1.get(cui, 0.0)
-                c2 = w2 * n2.get(cui, 0.0)
-                c3 = w3 * n3.get(cui, 0.0)
+                c1 = active_weights["sapbert"] * n1.get(cui, 0.0)
+                c2 = active_weights["bioconceptvec"] * n2.get(cui, 0.0)
+                c3 = active_weights["cui2vec"] * n3.get(cui, 0.0)
                 boost = 0.0
                 score = c1 + c2 + c3
+                if anchor_strength > 0.0:
+                    score = ((1.0 - anchor_strength) * score) + (anchor_strength * n1.get(cui, 0.0))
                 if (args.mrrel_boost > 0 or args.mrrel_count_boost > 0) and mrrel_neighbors and seed_cuis:
                     neigh = mrrel_neighbors.get(cui, set())
                     if any(s in neigh for s in seed_cuis):
@@ -1301,28 +1851,42 @@ def create_app(args):
                 contrib[cui] = (c1, c2, c3, boost)
             ranking = sorted(fused.items(), key=lambda x: x[1], reverse=True)
             mode_seed_cuis = sorted(seed_cuis)
+            notes = []
+            for label, status in (("BioConceptVec", st2), ("cui2vec", st3)):
+                detail = summarize_status_detail(status)
+                if detail:
+                    notes.append(f"{label}: {detail}")
             status_msg = (
                 "Mode: Ensemble. "
                 f"Candidates sapbert={len(d1)}, bioconceptvec={len(d2)}, cui2vec={len(d3)}. "
-                f"Weights=({w1},{w2},{w3}), "
+                f"Configured weights=({configured_weights['sapbert']},{configured_weights['bioconceptvec']},{configured_weights['cui2vec']}), "
+                f"effective weights=({active_weights['sapbert']:.3f},{active_weights['bioconceptvec']:.3f},{active_weights['cui2vec']:.3f}), "
+                f"sapbert anchor={anchor_strength:.3f}, "
                 f"MRREL base boost={args.mrrel_boost}, MRREL combo boost={args.mrrel_count_boost}."
             )
+            if notes:
+                status_msg += " " + " ".join(notes)
 
         query_profile = infer_query_semantic_profile(query, mode_seed_cuis, term_to_cui, cui_to_info, sty_to_group)
         reranked = []
         for cui, base_score in ranking:
-            _, sty_list = cui_to_info.get(cui, (cui, []))
+            term, sty_list = cui_to_info.get(cui, (cui, []))
             groups = {sty_to_group.get(sty, "Unknown") for sty in sty_list} if sty_list else {"Unknown"}
             if selected_mode == "ensemble":
                 c1, c2, c3, _ = contrib.get(cui, (0.0, 0.0, 0.0, 0.0))
                 support_count = int(c1 > 0) + int(c2 > 0) + int(c3 > 0)
             else:
+                c1, c2, c3 = (0.0, 0.0, 0.0)
                 support_count = 1
-            mult = semantic_compatibility_multiplier(groups, query_profile, support_count)
-            reranked.append((cui, float(base_score) * mult))
+            semantic_mult = semantic_compatibility_multiplier(groups, query_profile, support_count)
+            lexical_mult = lexical_relevance_multiplier(query_variants, term)
+            intent_mult = intent_match_multiplier(sty_list, query_profile)
+            form_mult = concept_form_multiplier(query_variants, term, sty_list, query_profile)
+            source_mult = ensemble_source_multiplier(query_variants, term, c1, c2, c3) if selected_mode == "ensemble" else 1.0
+            reranked.append((cui, float(base_score) * semantic_mult * lexical_mult * intent_mult * form_mult * source_mult))
         ranking = sorted(reranked, key=lambda x: x[1], reverse=True)
         dominant_group = query_profile.get("dominant_group") or "unknown"
-        status_msg += f" Semantic rerank dominant group: {dominant_group}."
+        status_msg += f" Semantic, lexical, intent, and form rerank dominant group: {dominant_group}."
 
         results = []
         sty_set = set()
